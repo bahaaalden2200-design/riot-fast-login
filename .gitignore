@@ -1,0 +1,25 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Executables and debug files
+*.exe
+*.pdb
+*.obj
+*.tmp
+*.log
+
+# User session data & credentials protection (CRITICAL: never commit user sessions!)
+profiles/
+*.yaml
+*.jsonl
+accounts.json
+
+# IDE and Editor configs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
