@@ -143,6 +143,31 @@ impl StorageManager {
         fs::copy(&saved_yaml, target_yaml)
             .map_err(|e| format!("Failed to restore session YAML: {}", e))?;
 
+        // Also sync session to League of Legends and VALORANT private settings if present
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            let lol_target = PathBuf::from(&local_app_data)
+                .join("Riot Games")
+                .join("League of Legends")
+                .join("Data")
+                .join("RiotGamesPrivateSettings.yaml");
+            if let Some(parent) = lol_target.parent() {
+                if parent.exists() {
+                    let _ = fs::copy(&saved_yaml, &lol_target);
+                }
+            }
+
+            let val_target = PathBuf::from(&local_app_data)
+                .join("Riot Games")
+                .join("VALORANT")
+                .join("Data")
+                .join("RiotGamesPrivateSettings.yaml");
+            if let Some(parent) = val_target.parent() {
+                if parent.exists() {
+                    let _ = fs::copy(&saved_yaml, &val_target);
+                }
+            }
+        }
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -153,6 +178,47 @@ impl StorageManager {
         self.save_config(&config)?;
 
         Ok(updated_profile)
+    }
+
+    pub fn update_saved_account_session(
+        &self,
+        active: &ActiveAccount,
+        source_yaml: &PathBuf,
+    ) -> Result<(), String> {
+        if !source_yaml.exists() {
+            return Err("Source YAML does not exist".to_string());
+        }
+
+        let clean_name = if !active.game_name.is_empty() {
+            format!("{}_{}", active.game_name, active.tag_line)
+        } else if !active.username.is_empty() {
+            active.username.clone()
+        } else {
+            return Err("Empty active account name".to_string());
+        };
+
+        let safe_id: String = clean_name
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+
+        let yaml_filename = format!("{}.yaml", safe_id);
+        let destination_yaml = self.profiles_dir.join(&yaml_filename);
+
+        fs::copy(source_yaml, &destination_yaml)
+            .map_err(|e| format!("Failed to update session YAML: {}", e))?;
+
+        let mut config = self.load_config();
+        if let Some(profile) = config.accounts.iter_mut().find(|a| a.id == safe_id) {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            profile.last_used = now;
+            let _ = self.save_config(&config);
+        }
+
+        Ok(())
     }
 
     pub fn delete_profile(&self, profile_id: &str) -> Result<(), String> {

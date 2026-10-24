@@ -212,7 +212,44 @@ impl RiotManager {
             .creation_flags(CREATE_NO_WINDOW)
             .output();
 
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        // Allow kernel to release file locks
+        std::thread::sleep(std::time::Duration::from_millis(800));
+
+        // Delete any stale lockfiles
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            let lf1 = PathBuf::from(&local_app_data)
+                .join("Riot Games")
+                .join("Riot Client")
+                .join("Config")
+                .join("lockfile");
+            let _ = std::fs::remove_file(lf1);
+        }
+        let lf2 = PathBuf::from(r"C:\ProgramData\Riot Games\Metadata\Riot Client\lockfile");
+        let _ = std::fs::remove_file(lf2);
+    }
+
+    pub fn prepare_clean_login(&self) {
+        Self::kill_riot_processes();
+
+        let clean_yaml = "psl:\n    authorization:\n        riot-client: null\nrso-authenticator:\n    tdid:\n        domain: \"riotgames.com\"\n        expiryTime: 1824410913\n        hostOnly: false\n        httpOnly: true\n        name: \"tdid\"\n        path: \"/\"\n        persistent: true\n        secureOnly: true\n";
+        let _ = std::fs::write(&self.settings_yaml_path, clean_yaml);
+
+        // Also clean game-specific private settings
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            let lol = PathBuf::from(&local_app_data)
+                .join("Riot Games")
+                .join("League of Legends")
+                .join("Data")
+                .join("RiotGamesPrivateSettings.yaml");
+            let _ = std::fs::write(lol, "riot-login:\n    persist: null\n");
+
+            let val = PathBuf::from(&local_app_data)
+                .join("Riot Games")
+                .join("VALORANT")
+                .join("Data")
+                .join("RiotGamesPrivateSettings.yaml");
+            let _ = std::fs::write(val, "riot-login:\n    persist: null\n");
+        }
     }
 
     pub fn launch(&self, product: &str) -> Result<(), String> {
@@ -231,7 +268,7 @@ impl RiotManager {
                 cmd.args(["--launch-product=valorant", "--launch-patchline=live"]);
             }
             _ => {
-                cmd.args(["--launch-product=riot_client", "--launch-patchline=live"]);
+                // Official shortcut launches RiotClientServices.exe with NO extra args
             }
         }
 

@@ -65,6 +65,7 @@ enum HitArea {
     Account(usize),
     PlayBtn(usize),
     Delete(usize),
+    AddAccount,
 }
 
 struct GuiState {
@@ -188,6 +189,9 @@ fn check_and_autosave(state: &mut GuiState) -> bool {
 
     if let Some(ref act) = current_active {
         if !act.game_name.is_empty() {
+            // ALWAYS update the saved YAML profile with the latest active session tokens!
+            let _ = state.storage.update_saved_account_session(act, &state.riot.settings_yaml_path);
+
             let conf = state.storage.load_config();
             let already_saved = conf.accounts.iter().any(|a| {
                 a.game_name.eq_ignore_ascii_case(&act.game_name)
@@ -196,7 +200,7 @@ fn check_and_autosave(state: &mut GuiState) -> bool {
 
             if !already_saved {
                 if let Ok(p) = state.storage.save_active_account(act, None, &state.riot.settings_yaml_path) {
-                    state.feedback_text = format!("Auto-linked new account: {}#{}", p.game_name, p.tag_line);
+                    state.feedback_text = format!("Linked new account: {}#{}", p.game_name, p.tag_line);
                     state.feedback_is_error = false;
                     return true;
                 }
@@ -803,6 +807,18 @@ unsafe fn render_riot_client(hwnd: HWND, hdc: HDC) {
         let msg_desc = to_wstring("1. Open Riot Client and sign into your account.\n2. Ensure 'Stay signed in' is checked.\n3. Your account will appear here automatically!");
         let mut d_rc = RECT { left: card_x + 16, top: box_y + 90, right: card_x + card_w - 16, bottom: box_y + 160 };
         DrawTextW(mem_dc, msg_desc.as_ptr(), -1, &mut d_rc, (DT_CENTER | DT_WORDBREAK) as u32);
+
+        let add_btn_y = box_y + box_h + 12;
+        let add_btn_h = 42;
+        let is_add_hover = hov == Some(HitArea::AddAccount);
+        let add_bg = if is_add_hover { COLOR_CARD_HOVER } else { 0x00141210 };
+        let add_border = if is_add_hover { COLOR_RIOT_RED } else { 0x002E2822 };
+        draw_round_rect(mem_dc, card_x, add_btn_y, card_x + card_w, add_btn_y + add_btn_h, 8, add_bg, add_border, if is_add_hover { 2 } else { 1 });
+        SelectObject(mem_dc, font_sub as *mut _);
+        SetTextColor(mem_dc, if is_add_hover { COLOR_TEXT_WHITE } else { COLOR_TEXT_GRAY });
+        let add_text_w = to_wstring("+  Open Riot Client to Sign In");
+        let mut add_rc = RECT { left: card_x, top: add_btn_y, right: card_x + card_w, bottom: add_btn_y + add_btn_h };
+        DrawTextW(mem_dc, add_text_w.as_ptr(), -1, &mut add_rc, (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32);
     } else {
         let clip_rgn = CreateRectRgn(card_x - 4, list_start_y - 2, card_x + card_w + 4, height - 32);
         SelectClipRgn(mem_dc, clip_rgn);
@@ -994,6 +1010,37 @@ unsafe fn render_riot_client(hwnd: HWND, hdc: HDC) {
         }
     }
 
+    // Draw "+ Add / Link Another Account" button
+    let add_btn_y = list_start_y - scroll_offset + (config.accounts.len() as i32 * (card_h + card_spacing));
+    let add_btn_h = 42;
+    let is_add_hover = hov == Some(HitArea::AddAccount);
+
+    let add_bg = if is_add_hover { COLOR_CARD_HOVER } else { 0x00141210 };
+    let add_border = if is_add_hover { COLOR_RIOT_RED } else { 0x002E2822 };
+
+    draw_round_rect(
+        mem_dc,
+        card_x,
+        add_btn_y,
+        card_x + card_w,
+        add_btn_y + add_btn_h,
+        8,
+        add_bg,
+        add_border,
+        if is_add_hover { 2 } else { 1 },
+    );
+
+    SelectObject(mem_dc, font_sub as *mut _);
+    SetTextColor(mem_dc, if is_add_hover { COLOR_TEXT_WHITE } else { COLOR_TEXT_GRAY });
+    let add_text_w = to_wstring("+  Add / Link Another Account");
+    let mut add_rc = RECT {
+        left: card_x,
+        top: add_btn_y,
+        right: card_x + card_w,
+        bottom: add_btn_y + add_btn_h,
+    };
+    DrawTextW(mem_dc, add_text_w.as_ptr(), -1, &mut add_rc, (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32);
+
     SelectClipRgn(mem_dc, 0 as HRGN);
     DeleteObject(clip_rgn as *mut _);
 }
@@ -1083,6 +1130,22 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
                     break;
                 }
             }
+
+            if acc_count == 0 {
+                let box_y = list_start_y;
+                let box_h = 175;
+                let add_btn_y = box_y + box_h + 12;
+                let add_btn_h = 42;
+                if x >= card_x && x <= card_x + card_w && y >= add_btn_y && y <= add_btn_y + add_btn_h {
+                    new_hit = Some(HitArea::AddAccount);
+                }
+            } else if new_hit.is_none() {
+                let add_btn_y = list_start_y - scroll_offset + (acc_count as i32 * (card_h + card_spacing));
+                let add_btn_h = 42;
+                if x >= card_x && x <= card_x + card_w && y >= add_btn_y && y <= add_btn_y + add_btn_h {
+                    new_hit = Some(HitArea::AddAccount);
+                }
+            }
         }
     }
 
@@ -1123,6 +1186,31 @@ unsafe fn handle_mouse_down(hwnd: HWND, x: i32, y: i32) {
             }
             HitArea::BtnClose => {
                 DestroyWindow(hwnd);
+            }
+            HitArea::AddAccount => {
+                if let Some(state_arc) = GUI_STATE.get() {
+                    if let Ok(mut state) = state_arc.lock() {
+                        state.feedback_text = "Preparing Riot Client login...".to_string();
+                        state.feedback_is_error = false;
+                    }
+                }
+                InvalidateRect(hwnd, null_mut(), 0);
+                UpdateWindow(hwnd);
+
+                if let Some(state_arc) = GUI_STATE.get() {
+                    if let Ok(state) = state_arc.lock() {
+                        state.riot.prepare_clean_login();
+                        let _ = state.riot.launch("riot_client");
+                    }
+                }
+
+                if let Some(state_arc) = GUI_STATE.get() {
+                    if let Ok(mut state) = state_arc.lock() {
+                        state.feedback_text = "Sign into your account with 'Stay signed in'!".to_string();
+                        state.feedback_is_error = false;
+                    }
+                }
+                InvalidateRect(hwnd, null_mut(), 0);
             }
             HitArea::Account(idx) | HitArea::PlayBtn(idx) => {
                 let (target_id, target_name) = {
