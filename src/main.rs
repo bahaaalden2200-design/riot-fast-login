@@ -37,8 +37,9 @@ fn ensure_single_instance() -> bool {
             let hwnd = FindWindowW(class_name.as_ptr(), null_mut());
             if hwnd != 0 as HWND {
                 gui::restore_from_tray(hwnd);
+                return false;
             }
-            return false;
+            return true;
         }
 
         // Keep mutex handle open for process lifetime without closing it

@@ -1,11 +1,10 @@
 use crate::riot::{ActiveAccount, RiotManager};
 use crate::storage::StorageManager;
-use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -20,7 +19,13 @@ pub const WM_APP_ASYNC_DONE: u32 = WM_USER + 101;
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 
 const ID_TRAY_OPEN: usize = 2001;
-const ID_TRAY_EXIT: usize = 2002;
+const ID_TRAY_NEXT: usize = 2002;
+const ID_TRAY_KILL: usize = 2003;
+const ID_TRAY_EXIT: usize = 2004;
+
+const ID_CTX_SWITCH_BASE: usize = 3000;
+const ID_CTX_DELETE_BASE: usize = 4000;
+
 const TIMER_AUTODETECT: usize = 1001;
 
 /// Helper to construct Win32 COLORREF (0x00BBGGRR) from standard RGB
@@ -29,75 +34,86 @@ const fn rgb(r: u8, g: u8, b: u8) -> u32 {
 }
 
 // =========================================================================
-// GOOGLE AI PRO — DEEP OLED BLACK & CRIMSON RED PALETTE
+// GOOGLE AI PRO — DEEP OLED BLACK & CRIMSON RED PALETTE (COMPACT FLYOUT)
 // =========================================================================
-const COLOR_OLED_BG: u32            = rgb(3, 3, 5);       // #030305 True Infinite OLED Black
-const COLOR_TOPBAR_BG: u32          = rgb(8, 7, 10);      // #08070A Elevated Top App Bar
-const COLOR_DOCK_BG: u32            = rgb(7, 6, 9);       // #070609 Bottom Action Dock
-const COLOR_OUTER_BORDER: u32       = rgb(48, 18, 26);    // #30121A Subtle Crimson-Obsidian Frame
-const COLOR_DIVIDER: u32            = rgb(26, 22, 28);    // #1A161C Hairline Structural Divider
+const COLOR_OLED_BG: u32            = rgb(5, 5, 8);       // #050508 Deep OLED Flyout Background
+const COLOR_OUTER_BORDER: u32       = rgb(46, 18, 26);    // #2E121A Subtle Crimson-Obsidian Frame
+const COLOR_DIVIDER: u32            = rgb(24, 18, 24);    // #181218 Hairline Divider
 
 // Card Surfaces
-const COLOR_CARD_BG: u32            = rgb(11, 10, 14);    // #0B0A0E Google AI Pro Obsidian Card
-const COLOR_CARD_HOVER: u32         = rgb(22, 11, 16);    // #160B10 Crimson-Tinted OLED Hover
-const COLOR_CARD_ACTIVE: u32        = rgb(19, 9, 13);     // #13090D Active Session Surface
-const COLOR_CARD_BORDER: u32        = rgb(28, 25, 33);    // #1C1921 Idle Card Border
-const COLOR_CARD_BORDER_ACTIVE: u32 = rgb(150, 22, 48);   // #961630 Active Card Crimson Border
-const COLOR_CARD_BORDER_HOVER: u32  = rgb(255, 32, 68);   // #FF2044 Electric Red Hover Border
+const COLOR_HERO_BG: u32            = rgb(11, 10, 15);    // #0B0A0F Upper Active Box Surface
+const COLOR_HERO_BORDER: u32        = rgb(32, 22, 28);    // #20161C Upper Active Box Border
+const COLOR_CARD_BG: u32            = rgb(11, 10, 15);    // #0B0A0F Compact Stream Card
+const COLOR_CARD_HOVER: u32         = rgb(22, 12, 17);    // #160C11 Hover Stream Card
+const COLOR_CARD_ACTIVE: u32        = rgb(20, 9, 14);     // #14090E Active Stream Card
+const COLOR_CARD_BORDER: u32        = rgb(26, 23, 32);    // #1A1720 Idle Card Border
+const COLOR_CARD_BORDER_HOVER: u32  = rgb(150, 24, 48);   // #961830 Hover Card Border
+const COLOR_CARD_BORDER_ACTIVE: u32 = rgb(255, 38, 72);   // #FF2648 Active Card Bright Red Border
 
-// Accents & Badges
-const COLOR_PRO_RED: u32            = rgb(255, 30, 66);   // #FF1E42 Google AI Pro Crimson Red
-const COLOR_RIOT_RED: u32           = rgb(235, 0, 41);    // #EB0029 Official Riot Red
-const COLOR_PRO_BADGE_BG: u32       = rgb(38, 8, 16);     // #260810 Pro Pill Fill
-const COLOR_PRO_BADGE_BORDER: u32   = rgb(190, 24, 52);   // #BE1834 Pro Pill Border
-const COLOR_PRO_BADGE_TEXT: u32     = rgb(255, 90, 115);  // #FF5A73 Pro Pill Text
+// Google AI Pro Crimson & Status Accents
+const COLOR_PRO_RED: u32            = rgb(255, 36, 70);   // #FF2446 Electric Google AI Pro Red
+const COLOR_RIOT_RED: u32           = rgb(225, 12, 48);   // #E10C30 Deep Riot Crimson
+const COLOR_RED_PILL_BG: u32        = rgb(36, 8, 16);     // #240810 Crimson Pill Fill
+const COLOR_RED_PILL_HOVER: u32     = rgb(56, 12, 24);    // #380C18 Crimson Pill Hover
+const COLOR_RED_PILL_BORDER: u32    = rgb(155, 22, 48);   // #9B1630 Crimson Pill Border
+const COLOR_RED_PILL_TEXT: u32      = rgb(255, 105, 128); // #FF6980 Crimson Pill Text
 
-const COLOR_SERVER_BG: u32          = rgb(26, 8, 14);     // #1A080E Server Badge Fill
-const COLOR_SERVER_BORDER: u32      = rgb(105, 20, 38);   // #691426 Server Badge Border
-const COLOR_SERVER_TEXT: u32        = rgb(255, 85, 110);  // #FF556E Server Badge Text
+const COLOR_BTN_DARK_BG: u32        = rgb(17, 15, 22);    // #110F16 Dark Button Fill
+const COLOR_BTN_DARK_HOVER: u32     = rgb(28, 22, 32);    // #1C1620 Dark Button Hover
+const COLOR_BTN_DARK_BORDER: u32    = rgb(38, 32, 46);    // #26202E Dark Button Border
 
-const COLOR_GOOGLE_GREEN: u32       = rgb(52, 199, 89);   // #34C759 Active Session LED Green
+const COLOR_ACTIVE_BADGE_BG: u32    = rgb(12, 36, 22);    // #0C2416 Active Green Pill Fill
+const COLOR_ACTIVE_BADGE_BD: u32    = rgb(26, 82, 48);    // #1A5230 Active Green Pill Border
+const COLOR_GOOGLE_GREEN: u32       = rgb(52, 211, 105);  // #34D369 Vibrant Emerald Green
 
-// Typography Colors (Google Material 3 Dark)
-const COLOR_TEXT_WHITE: u32         = rgb(248, 249, 250); // #F8F9FA Crisp Primary White
-const COLOR_TEXT_SECONDARY: u32     = rgb(154, 160, 166); // #9AA0A6 Secondary Label Gray
-const COLOR_TEXT_MUTED: u32         = rgb(104, 108, 118); // #686C76 Muted Caption Gray
+// Typography Colors
+const COLOR_TEXT_WHITE: u32         = rgb(245, 246, 250); // #F5F6FA Primary Crisp White
+const COLOR_TEXT_SECONDARY: u32     = rgb(150, 156, 168); // #969CA8 Secondary Gray
+const COLOR_TEXT_MUTED: u32         = rgb(98, 102, 116);  // #626674 Muted Dim Gray
 
-// Layout Geometry Constants
-const WIN_WIDTH: i32       = 480;
-const WIN_HEIGHT: i32      = 580;
-const TOPBAR_H: i32        = 52;
-const HEADER_END_Y: i32    = 132;
-const DOCK_START_Y: i32    = 480;
-const CARD_X: i32          = 22;
-const CARD_H: i32          = 82;
-const CARD_SPACING: i32    = 10;
+// Compact Flyout Dimensions
+const WIN_WIDTH: i32       = 392;
+const WIN_HEIGHT: i32      = 522;
+const PAD_X: i32           = 14;
+const TOPBAR_H: i32        = 44;
+const HERO_TOP_Y: i32      = 48;
+const HERO_H: i32          = 104;
+const LIST_START_Y: i32    = 162;
+const FOOTER_START_Y: i32  = 454;
+const CARD_H: i32          = 46;
+const CARD_SPACING: i32    = 7;
 
-// Win32 Icon constants
+// Win32 Constants
 const IMAGE_ICON_TYPE: u32      = 1;
 const LR_LOADFROMFILE_FLAG: u32 = 0x00000010;
-const DI_NORMAL_FLAG: u32       = 0x0003;
 
 // Authentic Riot Games Official Typography
 const FONT_BEAUFORT_BOLD: &[u8]   = include_bytes!("../assets/fonts/BeaufortforLOL-Bold.ttf");
 const FONT_BEAUFORT_MEDIUM: &[u8] = include_bytes!("../assets/fonts/BeaufortforLOL-Medium.ttf");
 
 // Unicode Vector Glyphs (Segoe Fluent Icons / Segoe MDL2 Assets)
-const GLYPH_PLAY: &str     = "\u{E768}";
-const GLYPH_TRASH: &str    = "\u{E74D}";
-const GLYPH_MINIMIZE: &str = "\u{E921}";
+const GLYPH_REFRESH: &str  = "\u{E72C}";
+const GLYPH_PIN: &str      = "\u{E718}";
 const GLYPH_CLOSE: &str    = "\u{E8BB}";
+const GLYPH_POWER: &str    = "\u{E7E8}";
+const GLYPH_BOLT: &str     = "\u{E945}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HitArea {
     TitleBar,
-    BtnClose,
-    BtnMinimize,
+    TabRiot,
+    TabVal,
+    TabLol,
     BtnSync,
+    BtnPin,
+    BtnClose,
+    BtnSwitchMenu,
+    BtnNextAccount,
     Account(usize),
-    PlayBtn(usize),
-    Delete(usize),
+    ToggleAutoLaunch,
+    BtnSaveCurrent,
     AddAccount,
+    BtnKillRiot,
 }
 
 struct GuiState {
@@ -108,11 +124,9 @@ struct GuiState {
     feedback_text: String,
     feedback_is_error: bool,
     is_busy: bool,
+    is_pinned: bool,
+    auto_launch: bool,
     tracking_mouse: bool,
-    official_icon: HICON,
-    app_icon_small: HICON,
-    account_icons: HashMap<String, HICON>,
-    icons_dir: PathBuf,
     scroll_offset: i32,
 }
 
@@ -125,7 +139,26 @@ pub fn to_wstring(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
-/// Loads the official Riot Games icon from disk
+/// Computes bottom-right coordinates docked directly above the Windows Taskbar
+pub unsafe fn get_taskbar_dock_coords(width: i32, height: i32) -> (i32, i32) {
+    let mut work_rc: RECT = std::mem::zeroed();
+    if SystemParametersInfoW(
+        SPI_GETWORKAREA,
+        0,
+        &mut work_rc as *mut _ as *mut _,
+        0,
+    ) != 0
+    {
+        let x = work_rc.right - width - 12;
+        let y = work_rc.bottom - height - 12;
+        (x.max(10), y.max(10))
+    } else {
+        let screen_w = GetSystemMetrics(SM_CXSCREEN);
+        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+        (screen_w - width - 16, screen_h - height - 56)
+    }
+}
+
 pub unsafe fn load_official_riot_icon_sized(size: i32) -> HICON {
     let paths = [
         r"C:\Riot Games\Riot Client\Resources\icon.ico",
@@ -150,7 +183,6 @@ pub unsafe fn load_official_riot_icon_sized(size: i32) -> HICON {
     LoadIconW(0 as HINSTANCE, IDI_APPLICATION)
 }
 
-/// Loads application/window icon (the dark black icon from embedded PE resources or assets/app.ico)
 pub unsafe fn load_app_window_icon_sized(size: i32) -> HICON {
     let hinst = GetModuleHandleW(null_mut()) as HINSTANCE;
     for &id in &[0usize, 1usize] {
@@ -199,16 +231,54 @@ pub unsafe fn hide_to_tray(hwnd: HWND) {
 }
 
 pub unsafe fn restore_from_tray(hwnd: HWND) {
-    let mut ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-    ex_style &= !(WS_EX_TOOLWINDOW as i32);
-    ex_style |= WS_EX_APPWINDOW as i32;
-    SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style);
+    let (dock_x, dock_y) = get_taskbar_dock_coords(WIN_WIDTH, WIN_HEIGHT);
+    let is_pinned = GUI_STATE
+        .get()
+        .and_then(|s| s.lock().ok().map(|st| st.is_pinned))
+        .unwrap_or(true);
+
+    SetWindowPos(
+        hwnd,
+        if is_pinned {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        },
+        dock_x,
+        dock_y,
+        WIN_WIDTH,
+        WIN_HEIGHT,
+        SWP_SHOWWINDOW,
+    );
     ShowWindow(hwnd, SW_RESTORE);
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
 }
 
-/// Automatically detects any active Riot account and keeps its rotating refresh token synced
+fn format_compact_age(last_used_secs: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if last_used_secs == 0 || now <= last_used_secs {
+        return "just now".to_string();
+    }
+    let diff = now - last_used_secs;
+    if diff < 3600 {
+        "just now".to_string()
+    } else if diff < 86400 {
+        format!("{}h", diff / 3600)
+    } else {
+        let d = diff / 86400;
+        let h = (diff % 86400) / 3600;
+        if h > 0 && d < 14 {
+            format!("{}d {}h", d, h)
+        } else {
+            format!("{}d", d)
+        }
+    }
+}
+
 fn check_and_autosave(state: &mut GuiState) -> bool {
     if state.is_busy {
         return false;
@@ -236,14 +306,13 @@ fn check_and_autosave(state: &mut GuiState) -> bool {
                     && a.tag_line.eq_ignore_ascii_case(&act.tag_line)
             });
 
-            // Always sync the latest rotating refresh token to the profile file
             if let Ok(p) = state
                 .storage
                 .save_active_account(act, None, &state.riot.settings_yaml_path)
             {
                 if !already_saved {
                     state.feedback_text =
-                        format!("✦ Auto-linked new account: {} #{}", p.game_name, p.tag_line);
+                        format!("✦ Linked: {} #{}", p.game_name, p.tag_line);
                     state.feedback_is_error = false;
                     return true;
                 }
@@ -256,7 +325,6 @@ fn check_and_autosave(state: &mut GuiState) -> bool {
 
 pub fn run_gui() {
     unsafe {
-        // Register authentic Riot Games fonts into private process memory
         let mut pc_fonts1: u32 = 0;
         AddFontMemResourceEx(
             FONT_BEAUFORT_BOLD.as_ptr() as *const _,
@@ -275,8 +343,7 @@ pub fn run_gui() {
         let class_name = to_wstring(WINDOW_CLASS_NAME);
         let hinstance = GetModuleHandleW(null_mut()) as HINSTANCE;
         let app_icon_big = load_app_window_icon_sized(48);
-        let app_icon_small = load_app_window_icon_sized(20);
-        let official_riot_icon = load_official_riot_icon_sized(46);
+        let app_icon_small = load_app_window_icon_sized(16);
 
         let wc = WNDCLASSW {
             style: CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW,
@@ -293,14 +360,12 @@ pub fn run_gui() {
 
         RegisterClassW(&wc);
 
-        let screen_w = GetSystemMetrics(SM_CXSCREEN);
-        let screen_h = GetSystemMetrics(SM_CYSCREEN);
-        let start_x = (screen_w - WIN_WIDTH) / 2;
-        let start_y = (screen_h - WIN_HEIGHT) / 2;
+        let (start_x, start_y) = get_taskbar_dock_coords(WIN_WIDTH, WIN_HEIGHT);
 
         let window_title = to_wstring("Riot Fast Login");
+        // Compact Taskbar Tray Flyout Window (WS_EX_TOOLWINDOW | WS_EX_TOPMOST)
         let hwnd = CreateWindowExW(
-            WS_EX_APPWINDOW,
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
             class_name.as_ptr(),
             window_title.as_ptr(),
             WS_POPUP | WS_VISIBLE,
@@ -339,7 +404,7 @@ pub fn run_gui() {
         nid.szTip[..tip_len].copy_from_slice(&tip[..tip_len]);
         Shell_NotifyIconW(NIM_ADD, &nid);
 
-        // Enable Windows 11 Dark Mode & Smooth Hardware Rounded Corners
+        // Enable Windows 11 Dark Mode & Smooth Rounded Flyout Corners
         let dark_mode: i32 = 1;
         DwmSetWindowAttribute(
             hwnd,
@@ -350,36 +415,32 @@ pub fn run_gui() {
         let corner_pref: u32 = 2; // DWMWCP_ROUND
         DwmSetWindowAttribute(
             hwnd,
-            33, // DWMWA_WINDOW_CORNER_PREFERENCE
+            33,
             &corner_pref as *const _ as *const _,
             std::mem::size_of::<u32>() as u32,
         );
         let border_col: u32 = COLOR_OUTER_BORDER;
         DwmSetWindowAttribute(
             hwnd,
-            34, // DWMWA_BORDER_COLOR
+            34,
             &border_col as *const _ as *const _,
             std::mem::size_of::<u32>() as u32,
         );
 
         let riot = RiotManager::new();
         let storage = StorageManager::new();
-        let icons_dir = storage.profiles_dir.parent().unwrap().join("icons");
-        let _ = std::fs::create_dir_all(&icons_dir);
 
         let mut state = GuiState {
             riot,
             storage,
             active_account: None,
             hovered: None,
-            feedback_text: "✦ Google AI Pro Session Engine • Ready to switch".to_string(),
+            feedback_text: String::new(),
             feedback_is_error: false,
             is_busy: false,
+            is_pinned: true,
+            auto_launch: true,
             tracking_mouse: false,
-            official_icon: official_riot_icon,
-            app_icon_small,
-            account_icons: HashMap::new(),
-            icons_dir,
             scroll_offset: 0,
         };
 
@@ -391,12 +452,131 @@ pub fn run_gui() {
 
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
+        SetForegroundWindow(hwnd);
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, 0 as HWND, 0, 0) > 0 {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+}
+
+unsafe fn trigger_account_switch(hwnd: HWND, idx: usize) {
+    let (target_id, target_name, auto_launch, riot, storage) = {
+        if let Some(state_arc) = GUI_STATE.get() {
+            if let Ok(mut state) = state_arc.lock() {
+                if state.is_busy {
+                    return;
+                }
+                let conf = state.storage.load_config();
+                if idx < conf.accounts.len() {
+                    let id = conf.accounts[idx].id.clone();
+                    let name = format!(
+                        "{} #{}",
+                        conf.accounts[idx].game_name, conf.accounts[idx].tag_line
+                    );
+                    state.is_busy = true;
+                    state.feedback_text = format!("⚡ Switching to {}...", name);
+                    state.feedback_is_error = false;
+                    (
+                        id,
+                        name,
+                        state.auto_launch,
+                        state.riot.clone(),
+                        state.storage.clone(),
+                    )
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
+        } else {
+            return;
+        }
+    };
+
+    InvalidateRect(hwnd, null_mut(), 0);
+    UpdateWindow(hwnd);
+
+    let hwnd_val = hwnd as isize;
+    std::thread::spawn(move || {
+        storage.backup_current_active_session(&riot);
+        RiotManager::kill_riot_processes();
+        storage.backup_current_active_session(&riot);
+
+        let res = storage.apply_profile(&target_id, &riot.settings_yaml_path);
+        match res {
+            Ok(_) => {
+                if auto_launch {
+                    let _ = riot.launch("riot_client");
+                }
+                if let Some(state_arc) = GUI_STATE.get() {
+                    if let Ok(mut state) = state_arc.lock() {
+                        state.is_busy = false;
+                        state.active_account = state.riot.get_active_account();
+                        state.feedback_text = if auto_launch {
+                            format!("✦ Active & Launched: {}", target_name)
+                        } else {
+                            format!("✦ Switched session: {}", target_name)
+                        };
+                        state.feedback_is_error = false;
+                    }
+                }
+                PostMessageW(hwnd_val as HWND, WM_APP_ASYNC_DONE, 0, 0);
+
+                if auto_launch {
+                    for delay_secs in [4u64, 4u64] {
+                        std::thread::sleep(std::time::Duration::from_secs(delay_secs));
+                        storage.backup_current_active_session(&riot);
+                        PostMessageW(hwnd_val as HWND, WM_APP_ASYNC_DONE, 0, 0);
+                    }
+                }
+            }
+            Err(e) => {
+                if let Some(state_arc) = GUI_STATE.get() {
+                    if let Ok(mut state) = state_arc.lock() {
+                        state.is_busy = false;
+                        state.feedback_text = e;
+                        state.feedback_is_error = true;
+                    }
+                }
+                PostMessageW(hwnd_val as HWND, WM_APP_ASYNC_DONE, 0, 0);
+            }
+        }
+    });
+}
+
+unsafe fn trigger_next_account(hwnd: HWND) {
+    let next_idx = {
+        if let Some(state_arc) = GUI_STATE.get() {
+            if let Ok(state) = state_arc.lock() {
+                let conf = state.storage.load_config();
+                if conf.accounts.is_empty() {
+                    None
+                } else if let Some(ref act) = state.active_account {
+                    let curr_pos = conf.accounts.iter().position(|a| {
+                        a.game_name.eq_ignore_ascii_case(&act.game_name)
+                            && a.tag_line.eq_ignore_ascii_case(&act.tag_line)
+                    });
+                    Some(match curr_pos {
+                        Some(p) => (p + 1) % conf.accounts.len(),
+                        None => 0,
+                    })
+                } else {
+                    Some(0)
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Some(idx) = next_idx {
+        trigger_account_switch(hwnd, idx);
     }
 }
 
@@ -411,6 +591,19 @@ unsafe extern "system" fn wndproc(
         WM_APP_ASYNC_DONE => {
             InvalidateRect(hwnd, null_mut(), 0);
             UpdateWindow(hwnd);
+            0
+        }
+        WM_ACTIVATE => {
+            let active = (wparam & 0xFFFF) as u32;
+            if active == WA_INACTIVE {
+                let is_pinned = GUI_STATE
+                    .get()
+                    .and_then(|s| s.lock().ok().map(|st| st.is_pinned))
+                    .unwrap_or(true);
+                if !is_pinned {
+                    hide_to_tray(hwnd);
+                }
+            }
             0
         }
         WM_TIMER => {
@@ -434,12 +627,7 @@ unsafe extern "system" fn wndproc(
                     if IsWindowVisible(hwnd) == 0 {
                         restore_from_tray(hwnd);
                     } else {
-                        let fg = GetForegroundWindow();
-                        if fg == hwnd {
-                            hide_to_tray(hwnd);
-                        } else {
-                            SetForegroundWindow(hwnd);
-                        }
+                        hide_to_tray(hwnd);
                     }
                 }
                 WM_RBUTTONUP => {
@@ -448,9 +636,13 @@ unsafe extern "system" fn wndproc(
                     SetForegroundWindow(hwnd);
 
                     let hmenu = CreatePopupMenu();
-                    let open_str = to_wstring("Open Riot Fast Login PRO");
+                    let open_str = to_wstring("Open / Hide Flyout");
+                    let next_str = to_wstring("Switch to Next Account");
+                    let kill_str = to_wstring("Close Riot Client");
                     let exit_str = to_wstring("Exit");
                     AppendMenuW(hmenu, MF_STRING, ID_TRAY_OPEN, open_str.as_ptr());
+                    AppendMenuW(hmenu, MF_STRING, ID_TRAY_NEXT, next_str.as_ptr());
+                    AppendMenuW(hmenu, MF_STRING, ID_TRAY_KILL, kill_str.as_ptr());
                     AppendMenuW(hmenu, MF_SEPARATOR, 0, null_mut());
                     AppendMenuW(hmenu, MF_STRING, ID_TRAY_EXIT, exit_str.as_ptr());
 
@@ -472,14 +664,47 @@ unsafe extern "system" fn wndproc(
         }
         WM_COMMAND => {
             let id = (wparam & 0xFFFF) as usize;
-            match id {
-                ID_TRAY_OPEN => {
+            if id == ID_TRAY_OPEN {
+                if IsWindowVisible(hwnd) == 0 {
                     restore_from_tray(hwnd);
+                } else {
+                    hide_to_tray(hwnd);
                 }
-                ID_TRAY_EXIT => {
-                    DestroyWindow(hwnd);
+            } else if id == ID_TRAY_NEXT {
+                trigger_next_account(hwnd);
+            } else if id == ID_TRAY_KILL {
+                std::thread::spawn(|| {
+                    RiotManager::kill_riot_processes();
+                });
+            } else if id == ID_TRAY_EXIT {
+                DestroyWindow(hwnd);
+            } else if id >= ID_CTX_SWITCH_BASE && id < ID_CTX_SWITCH_BASE + 500 {
+                let idx = id - ID_CTX_SWITCH_BASE;
+                trigger_account_switch(hwnd, idx);
+            } else if id >= ID_CTX_DELETE_BASE && id < ID_CTX_DELETE_BASE + 500 {
+                let idx = id - ID_CTX_DELETE_BASE;
+                let target_id = {
+                    if let Some(state_arc) = GUI_STATE.get() {
+                        if let Ok(state) = state_arc.lock() {
+                            let conf = state.storage.load_config();
+                            conf.accounts.get(idx).map(|a| a.id.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+                if let Some(tid) = target_id {
+                    if let Some(state_arc) = GUI_STATE.get() {
+                        if let Ok(mut state) = state_arc.lock() {
+                            let _ = state.storage.delete_profile(&tid);
+                            state.feedback_text = "Account deleted.".to_string();
+                            state.feedback_is_error = false;
+                        }
+                    }
+                    InvalidateRect(hwnd, null_mut(), 0);
                 }
-                _ => {}
             }
             0
         }
@@ -499,10 +724,10 @@ unsafe extern "system" fn wndproc(
                     let acc_count = state.storage.load_config().accounts.len();
                     let total_content_h =
                         (acc_count as i32) * (CARD_H + CARD_SPACING) - CARD_SPACING;
-                    let visible_h = DOCK_START_Y - HEADER_END_Y - 12;
+                    let visible_h = FOOTER_START_Y - LIST_START_Y - 8;
                     let max_scroll = (total_content_h - visible_h).max(0);
 
-                    let step = (delta / 120) * 46;
+                    let step = (delta / 120) * 36;
                     let new_scroll = (state.scroll_offset - step).clamp(0, max_scroll);
                     if state.scroll_offset != new_scroll {
                         state.scroll_offset = new_scroll;
@@ -552,6 +777,12 @@ unsafe extern "system" fn wndproc(
             let x = (lparam & 0xFFFF) as i16 as i32;
             let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
             handle_mouse_down(hwnd, x, y);
+            0
+        }
+        WM_RBUTTONUP => {
+            let x = (lparam & 0xFFFF) as i16 as i32;
+            let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+            handle_right_click(hwnd, x, y);
             0
         }
         WM_DESTROY => {
@@ -656,148 +887,20 @@ unsafe fn fill_rect_color(hdc: HDC, left: i32, top: i32, right: i32, bottom: i32
     DeleteObject(brush as *mut _);
 }
 
-// =========================================================================
-// GOOGLE AI PRO VECTOR CONTROLS
-// =========================================================================
-
-unsafe fn draw_pro_play_button(
-    hdc: HDC,
-    cx: i32,
-    cy: i32,
-    radius: i32,
-    is_hover: bool,
-    is_current: bool,
-    icon_font: HFONT,
-) {
-    let bg_col = if is_hover {
-        COLOR_PRO_RED
-    } else if is_current {
-        COLOR_RIOT_RED
-    } else {
-        rgb(32, 10, 16)
-    };
-    let border_col = if is_hover {
-        rgb(255, 110, 130)
-    } else if is_current {
-        COLOR_PRO_RED
-    } else {
-        rgb(110, 20, 40)
-    };
-
-    draw_round_rect(
-        hdc,
-        cx - radius,
-        cy - radius,
-        cx + radius,
-        cy + radius,
-        radius * 2,
-        bg_col,
-        border_col,
-        if is_hover { 2 } else { 1 },
-    );
-
-    SelectObject(hdc, icon_font as *mut _);
-    SetTextColor(
-        hdc,
-        if is_hover || is_current {
-            COLOR_TEXT_WHITE
-        } else {
-            COLOR_PRO_BADGE_TEXT
-        },
-    );
-    let play_w = to_wstring(GLYPH_PLAY);
-    let mut play_rect = RECT {
-        left: cx - radius + 2,
-        top: cy - radius,
-        right: cx + radius + 2,
-        bottom: cy + radius,
-    };
-    DrawTextW(
-        hdc,
-        play_w.as_ptr(),
-        -1,
-        &mut play_rect,
-        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
-    );
-}
-
-unsafe fn draw_pro_trash_button(
-    hdc: HDC,
-    cx: i32,
-    cy: i32,
-    size: i32,
-    is_hover: bool,
-    icon_font: HFONT,
-) {
-    let half = size / 2;
-    let bg_col = if is_hover {
-        rgb(45, 10, 18)
-    } else {
-        rgb(16, 14, 19)
-    };
-    let border_col = if is_hover {
-        COLOR_PRO_RED
-    } else {
-        rgb(38, 32, 42)
-    };
-
-    draw_round_rect(
-        hdc,
-        cx - half,
-        cy - half,
-        cx + half,
-        cy + half,
-        8,
-        bg_col,
-        border_col,
-        1,
-    );
-
-    SelectObject(hdc, icon_font as *mut _);
-    SetTextColor(
-        hdc,
-        if is_hover {
-            COLOR_PRO_RED
-        } else {
-            COLOR_TEXT_MUTED
-        },
-    );
-    let trash_w = to_wstring(GLYPH_TRASH);
-    let mut trash_rect = RECT {
-        left: cx - half,
-        top: cy - half,
-        right: cx + half,
-        bottom: cy + half,
-    };
-    DrawTextW(
-        hdc,
-        trash_w.as_ptr(),
-        -1,
-        &mut trash_rect,
-        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
-    );
-}
-
-unsafe fn draw_status_dot(hdc: HDC, cx: i32, cy: i32, color: u32, halo_color: u32) {
-    let null_pen = CreatePen(PS_NULL as i32, 0, 0);
-    let halo_brush = CreateSolidBrush(halo_color);
-    let old_p = SelectObject(hdc, null_pen as *mut _);
-    let old_b = SelectObject(hdc, halo_brush as *mut _);
-    Ellipse(hdc, cx - 6, cy - 6, cx + 7, cy + 7);
-
-    let core_brush = CreateSolidBrush(color);
-    SelectObject(hdc, core_brush as *mut _);
-    Ellipse(hdc, cx - 3, cy - 3, cx + 4, cy + 4);
-
+unsafe fn draw_circle(hdc: HDC, cx: i32, cy: i32, radius: i32, fill_color: u32) {
+    let brush = CreateSolidBrush(fill_color);
+    let pen = CreatePen(PS_NULL as i32, 0, 0);
+    let old_b = SelectObject(hdc, brush as *mut _);
+    let old_p = SelectObject(hdc, pen as *mut _);
+    Ellipse(hdc, cx - radius, cy - radius, cx + radius + 1, cy + radius + 1);
     SelectObject(hdc, old_b);
     SelectObject(hdc, old_p);
-    DeleteObject(halo_brush as *mut _);
-    DeleteObject(core_brush as *mut _);
-    DeleteObject(null_pen as *mut _);
+    DeleteObject(brush as *mut _);
+    DeleteObject(pen as *mut _);
 }
 
 // =========================================================================
-// MAIN RENDER LOOP — GOOGLE AI PRO OLED BLACK & RED
+// MAIN RENDER LOOP — COMPACT TASKBAR TRAY FLYOUT (GOOGLE AI PRO OLED & RED)
 // =========================================================================
 
 unsafe fn render_riot_client(hwnd: HWND, hdc: HDC) {
@@ -810,19 +913,8 @@ unsafe fn render_riot_client(hwnd: HWND, hdc: HDC) {
     let mem_bmp = CreateCompatibleBitmap(hdc, width, height);
     let old_bmp = SelectObject(mem_dc, mem_bmp as *mut _);
 
-    // 1. Fill Deep OLED Black Canvas
+    // 1. Deep OLED Black Flyout Canvas + Subtle Outer Crimson Border
     fill_rect_color(mem_dc, 0, 0, width, height, COLOR_OLED_BG);
-
-    // 2. Top App Bar & Bottom Dock Surfaces
-    fill_rect_color(mem_dc, 0, 0, width, TOPBAR_H, COLOR_TOPBAR_BG);
-    fill_rect_color(mem_dc, 0, DOCK_START_Y, width, height, COLOR_DOCK_BG);
-
-    // Structural Hairline Dividers + Crimson Glow Accent
-    fill_rect_color(mem_dc, 0, TOPBAR_H, width, TOPBAR_H + 1, COLOR_DIVIDER);
-    fill_rect_color(mem_dc, CARD_X, TOPBAR_H, CARD_X + 115, TOPBAR_H + 2, COLOR_PRO_RED);
-    fill_rect_color(mem_dc, 0, DOCK_START_Y, width, DOCK_START_Y + 1, COLOR_DIVIDER);
-
-    // Outer Window Frame
     let border_pen = CreatePen(PS_SOLID as i32, 1, COLOR_OUTER_BORDER);
     let old_p = SelectObject(mem_dc, border_pen as *mut _);
     let old_b = SelectObject(mem_dc, GetStockObject(NULL_BRUSH as i32));
@@ -832,24 +924,21 @@ unsafe fn render_riot_client(hwnd: HWND, hdc: HDC) {
     DeleteObject(border_pen as *mut _);
 
     // Typography
-    let font_brand = create_riot_font(14, true);
-    let font_pro_pill = create_riot_font(11, true);
-    let font_header = create_riot_font(25, true);
-    let font_sub = create_riot_sub_font(13, false);
-    let font_btn_bold = create_riot_sub_font(14, true);
-    let font_name_large = create_riot_font(20, true);
-    let font_tag = create_riot_sub_font(14, false);
-    let font_server_badge = create_riot_font(22, true); // 2x Scaled Server Font
-    let font_meta = create_riot_sub_font(12, true);
-
-    // Vector Icon Fonts
-    let font_icon_play = create_vector_icon_font(14);
-    let font_icon_trash = create_vector_icon_font(13);
-    let font_icon_window = create_vector_icon_font(11);
+    let font_pill = create_riot_sub_font(12, true);
+    let font_hero_name = create_riot_font(16, true);
+    let font_badge = create_riot_sub_font(11, true);
+    let font_btn = create_riot_sub_font(13, true);
+    let font_card_name = create_riot_font(15, true);
+    let font_card_meta = create_riot_sub_font(12, true);
+    let font_server = create_riot_font(14, true);
+    let font_footer_main = create_riot_sub_font(12, true);
+    let font_footer_sub = create_riot_sub_font(10, false);
+    let font_sparkle = create_font("Segoe UI Symbol", 14, true);
+    let font_icon = create_vector_icon_font(12);
 
     SetBkMode(mem_dc, TRANSPARENT as i32);
 
-    let (active_acc, config, hov, feedback, is_err, is_busy, scroll_offset, app_icon_small) = {
+    let (active_acc, config, hov, feedback, is_err, is_pinned, auto_launch, scroll_offset) = {
         if let Some(state_arc) = GUI_STATE.get() {
             if let Ok(state) = state_arc.lock() {
                 let conf = state.storage.load_config();
@@ -859,9 +948,9 @@ unsafe fn render_riot_client(hwnd: HWND, hdc: HDC) {
                     state.hovered,
                     state.feedback_text.clone(),
                     state.feedback_is_error,
-                    state.is_busy,
+                    state.is_pinned,
+                    state.auto_launch,
                     state.scroll_offset,
-                    state.app_icon_small,
                 )
             } else {
                 return;
@@ -872,269 +961,279 @@ unsafe fn render_riot_client(hwnd: HWND, hdc: HDC) {
     };
 
     // =========================================================================
-    // 3. GOOGLE AI PRO TOP BAR (0..52px)
+    // 1. TOP NAVIGATION PILLS & HEADER TOOLS (y: 10..40)
     // =========================================================================
-    let logo_x = CARD_X;
-    let logo_y = 16;
-    if app_icon_small != 0 as HICON {
-        DrawIconEx(
-            mem_dc,
-            logo_x,
-            logo_y,
-            app_icon_small,
-            20,
-            20,
-            0,
-            0 as HBRUSH,
-            DI_NORMAL_FLAG,
-        );
-    } else {
-        draw_round_rect(
-            mem_dc,
-            logo_x,
-            logo_y,
-            logo_x + 20,
-            logo_y + 20,
-            5,
-            COLOR_RIOT_RED,
-            COLOR_PRO_RED,
-            1,
-        );
-    }
+    let pill_y = 10;
+    let pill_h = 28;
 
-    SelectObject(mem_dc, font_brand as *mut _);
-    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-    let brand_w = to_wstring("RIOT FAST LOGIN");
-    let mut brand_sz: SIZE = std::mem::zeroed();
-    GetTextExtentPoint32W(
-        mem_dc,
-        brand_w.as_ptr(),
-        brand_w.len() as i32 - 1,
-        &mut brand_sz,
-    );
-    let brand_x = logo_x + 28;
-    let mut brand_rect = RECT {
-        left: brand_x,
-        top: 0,
-        right: brand_x + brand_sz.cx + 4,
-        bottom: TOPBAR_H,
-    };
-    DrawTextW(
-        mem_dc,
-        brand_w.as_ptr(),
-        -1,
-        &mut brand_rect,
-        (DT_LEFT | DT_VCENTER | DT_SINGLELINE) as u32,
-    );
-
-    // Google AI Pro "✦ PRO" Capsule Badge positioned dynamically right after brand title
-    let pro_x = brand_x + brand_sz.cx + 10;
-    let pro_y = 16;
-    let pro_w = 50;
-    let pro_h = 20;
+    // Pill 1: Active "✦ Riot ●"
+    let riot_x = PAD_X;
+    let riot_w = 86;
+    let is_riot_hov = hov == Some(HitArea::TabRiot);
     draw_round_rect(
         mem_dc,
-        pro_x,
-        pro_y,
-        pro_x + pro_w,
-        pro_y + pro_h,
-        10,
-        COLOR_PRO_BADGE_BG,
-        COLOR_PRO_BADGE_BORDER,
+        riot_x,
+        pill_y,
+        riot_x + riot_w,
+        pill_y + pill_h,
+        14,
+        if is_riot_hov {
+            COLOR_RED_PILL_HOVER
+        } else {
+            COLOR_RED_PILL_BG
+        },
+        if is_riot_hov {
+            COLOR_PRO_RED
+        } else {
+            COLOR_RED_PILL_BORDER
+        },
         1,
     );
-    SelectObject(mem_dc, font_pro_pill as *mut _);
-    SetTextColor(mem_dc, COLOR_PRO_BADGE_TEXT);
-    let pro_txt = to_wstring("✦ PRO");
-    let mut pro_rc = RECT {
-        left: pro_x,
-        top: pro_y,
-        right: pro_x + pro_w,
-        bottom: pro_y + pro_h,
+    SelectObject(mem_dc, font_pill as *mut _);
+    SetTextColor(mem_dc, COLOR_RED_PILL_TEXT);
+    let riot_txt = to_wstring("✦  Riot");
+    let mut riot_rc = RECT {
+        left: riot_x + 12,
+        top: pill_y,
+        right: riot_x + riot_w - 20,
+        bottom: pill_y + pill_h,
     };
     DrawTextW(
         mem_dc,
-        pro_txt.as_ptr(),
+        riot_txt.as_ptr(),
         -1,
-        &mut pro_rc,
-        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
+        &mut riot_rc,
+        (DT_LEFT | DT_VCENTER | DT_SINGLELINE) as u32,
     );
+    draw_circle(mem_dc, riot_x + riot_w - 14, pill_y + 14, 3, COLOR_PRO_RED);
 
-    // Window Controls (Minimize & Close Pills)
-    let btn_w = 36;
-    let btn_h = 28;
-    let btn_y = (TOPBAR_H - btn_h) / 2;
-    let close_x = width - CARD_X - btn_w;
-    let min_x = close_x - btn_w - 6;
-
-    let is_close_hover = hov == Some(HitArea::BtnClose);
-    let is_min_hover = hov == Some(HitArea::BtnMinimize);
-
-    if is_min_hover {
+    // Pill 2: "</> VAL"
+    let val_x = riot_x + riot_w + 6;
+    let val_w = 66;
+    let is_val_hov = hov == Some(HitArea::TabVal);
+    if is_val_hov {
         draw_round_rect(
             mem_dc,
-            min_x,
-            btn_y,
-            min_x + btn_w,
-            btn_y + btn_h,
-            8,
-            rgb(26, 22, 30),
-            rgb(60, 45, 55),
+            val_x,
+            pill_y,
+            val_x + val_w,
+            pill_y + pill_h,
+            14,
+            COLOR_CARD_HOVER,
+            COLOR_CARD_BORDER_HOVER,
             1,
         );
     }
-    SelectObject(mem_dc, font_icon_window as *mut _);
+    SelectObject(mem_dc, font_pill as *mut _);
     SetTextColor(
         mem_dc,
-        if is_min_hover {
+        if is_val_hov {
             COLOR_TEXT_WHITE
         } else {
             COLOR_TEXT_SECONDARY
         },
     );
-    let min_w = to_wstring(GLYPH_MINIMIZE);
-    let mut min_rect = RECT {
-        left: min_x,
-        top: btn_y,
-        right: min_x + btn_w,
-        bottom: btn_y + btn_h,
+    let val_txt = to_wstring("</> VAL");
+    let mut val_rc = RECT {
+        left: val_x,
+        top: pill_y,
+        right: val_x + val_w,
+        bottom: pill_y + pill_h,
     };
     DrawTextW(
         mem_dc,
-        min_w.as_ptr(),
+        val_txt.as_ptr(),
         -1,
-        &mut min_rect,
+        &mut val_rc,
         (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
     );
 
-    if is_close_hover {
+    // Pill 3: ">_ LoL"
+    let lol_x = val_x + val_w + 4;
+    let lol_w = 64;
+    let is_lol_hov = hov == Some(HitArea::TabLol);
+    if is_lol_hov {
+        draw_round_rect(
+            mem_dc,
+            lol_x,
+            pill_y,
+            lol_x + lol_w,
+            pill_y + pill_h,
+            14,
+            COLOR_CARD_HOVER,
+            COLOR_CARD_BORDER_HOVER,
+            1,
+        );
+    }
+    SetTextColor(
+        mem_dc,
+        if is_lol_hov {
+            COLOR_TEXT_WHITE
+        } else {
+            COLOR_TEXT_SECONDARY
+        },
+    );
+    let lol_txt = to_wstring(">_ LoL");
+    let mut lol_rc = RECT {
+        left: lol_x,
+        top: pill_y,
+        right: lol_x + lol_w,
+        bottom: pill_y + pill_h,
+    };
+    DrawTextW(
+        mem_dc,
+        lol_txt.as_ptr(),
+        -1,
+        &mut lol_rc,
+        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
+    );
+
+    // Right Header Tool Icons: [ ↻ ] [ 📌 ] [ ✕ ]
+    let tool_sz = 28;
+    let close_x = width - PAD_X - tool_sz;
+    let pin_x = close_x - tool_sz - 4;
+    let sync_x = pin_x - tool_sz - 4;
+
+    // Sync Button
+    let is_sync_hov = hov == Some(HitArea::BtnSync);
+    if is_sync_hov {
+        draw_round_rect(
+            mem_dc,
+            sync_x,
+            pill_y,
+            sync_x + tool_sz,
+            pill_y + tool_sz,
+            8,
+            COLOR_BTN_DARK_HOVER,
+            COLOR_CARD_BORDER_HOVER,
+            1,
+        );
+    }
+    SelectObject(mem_dc, font_icon as *mut _);
+    SetTextColor(
+        mem_dc,
+        if is_sync_hov {
+            COLOR_TEXT_WHITE
+        } else {
+            COLOR_TEXT_SECONDARY
+        },
+    );
+    let sync_w = to_wstring(GLYPH_REFRESH);
+    let mut sync_rc = RECT {
+        left: sync_x,
+        top: pill_y,
+        right: sync_x + tool_sz,
+        bottom: pill_y + tool_sz,
+    };
+    DrawTextW(
+        mem_dc,
+        sync_w.as_ptr(),
+        -1,
+        &mut sync_rc,
+        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
+    );
+
+    // Pin Button
+    let is_pin_hov = hov == Some(HitArea::BtnPin);
+    if is_pin_hov || is_pinned {
+        draw_round_rect(
+            mem_dc,
+            pin_x,
+            pill_y,
+            pin_x + tool_sz,
+            pill_y + tool_sz,
+            8,
+            if is_pinned {
+                COLOR_RED_PILL_BG
+            } else {
+                COLOR_BTN_DARK_HOVER
+            },
+            if is_pinned {
+                COLOR_RED_PILL_BORDER
+            } else {
+                COLOR_BTN_DARK_BORDER
+            },
+            1,
+        );
+    }
+    SetTextColor(
+        mem_dc,
+        if is_pinned {
+            COLOR_PRO_RED
+        } else if is_pin_hov {
+            COLOR_TEXT_WHITE
+        } else {
+            COLOR_TEXT_MUTED
+        },
+    );
+    let pin_w = to_wstring(GLYPH_PIN);
+    let mut pin_rc = RECT {
+        left: pin_x,
+        top: pill_y,
+        right: pin_x + tool_sz,
+        bottom: pill_y + tool_sz,
+    };
+    DrawTextW(
+        mem_dc,
+        pin_w.as_ptr(),
+        -1,
+        &mut pin_rc,
+        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
+    );
+
+    // Close / Hide Button
+    let is_close_hov = hov == Some(HitArea::BtnClose);
+    if is_close_hov {
         draw_round_rect(
             mem_dc,
             close_x,
-            btn_y,
-            close_x + btn_w,
-            btn_y + btn_h,
+            pill_y,
+            close_x + tool_sz,
+            pill_y + tool_sz,
             8,
             COLOR_RIOT_RED,
             COLOR_PRO_RED,
             1,
         );
     }
-    SelectObject(mem_dc, font_icon_window as *mut _);
     SetTextColor(
         mem_dc,
-        if is_close_hover {
+        if is_close_hov {
             COLOR_TEXT_WHITE
         } else {
             COLOR_TEXT_SECONDARY
         },
     );
     let close_w = to_wstring(GLYPH_CLOSE);
-    let mut close_rect = RECT {
+    let mut close_rc = RECT {
         left: close_x,
-        top: btn_y,
-        right: close_x + btn_w,
-        bottom: btn_y + btn_h,
+        top: pill_y,
+        right: close_x + tool_sz,
+        bottom: pill_y + tool_sz,
     };
     DrawTextW(
         mem_dc,
         close_w.as_ptr(),
         -1,
-        &mut close_rect,
+        &mut close_rc,
         (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
     );
 
     // =========================================================================
-    // 4. WORKSPACE HEADER & MANUAL SYNC BUTTON (52..132px)
+    // 2. ACTIVE ACCOUNT HERO BOX (y: 48..152)
     // =========================================================================
-    SelectObject(mem_dc, font_header as *mut _);
-    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-    let title_w = to_wstring("Account Workspace");
-    let mut title_rect = RECT {
-        left: CARD_X,
-        top: 64,
-        right: width - 120,
-        bottom: 94,
-    };
-    DrawTextW(
-        mem_dc,
-        title_w.as_ptr(),
-        -1,
-        &mut title_rect,
-        (DT_LEFT | DT_SINGLELINE) as u32,
-    );
-
-    SelectObject(mem_dc, font_sub as *mut _);
-    SetTextColor(mem_dc, COLOR_TEXT_SECONDARY);
-    let sub_w = to_wstring("Instant 1-click switch • Rotating token protection");
-    let mut sub_rect = RECT {
-        left: CARD_X,
-        top: 96,
-        right: width - 120,
-        bottom: 118,
-    };
-    DrawTextW(
-        mem_dc,
-        sub_w.as_ptr(),
-        -1,
-        &mut sub_rect,
-        (DT_LEFT | DT_SINGLELINE) as u32,
-    );
-
-    // "↻ Sync" Pill Button on Header Right
-    let sync_w = 82;
-    let sync_h = 32;
-    let sync_x = width - CARD_X - sync_w;
-    let sync_y = 72;
-    let is_sync_hover = hov == Some(HitArea::BtnSync);
+    let box_w = width - (PAD_X * 2);
     draw_round_rect(
         mem_dc,
-        sync_x,
-        sync_y,
-        sync_x + sync_w,
-        sync_y + sync_h,
-        10,
-        if is_sync_hover {
-            rgb(34, 12, 18)
-        } else {
-            rgb(14, 11, 16)
-        },
-        if is_sync_hover {
-            COLOR_PRO_RED
-        } else {
-            rgb(58, 20, 30)
-        },
+        PAD_X,
+        HERO_TOP_Y,
+        PAD_X + box_w,
+        HERO_TOP_Y + HERO_H,
+        14,
+        COLOR_HERO_BG,
+        COLOR_HERO_BORDER,
         1,
     );
-    SelectObject(mem_dc, font_meta as *mut _);
-    SetTextColor(
-        mem_dc,
-        if is_sync_hover {
-            COLOR_TEXT_WHITE
-        } else {
-            COLOR_PRO_BADGE_TEXT
-        },
-    );
-    let sync_txt = to_wstring("↻  Sync");
-    let mut sync_rc = RECT {
-        left: sync_x,
-        top: sync_y,
-        right: sync_x + sync_w,
-        bottom: sync_y + sync_h,
-    };
-    DrawTextW(
-        mem_dc,
-        sync_txt.as_ptr(),
-        -1,
-        &mut sync_rc,
-        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
-    );
-
-    // =========================================================================
-    // 5. SCROLLABLE ACCOUNT CARDS VIEWPORT (132..480px)
-    // =========================================================================
-    let card_w = width - (CARD_X * 2);
-    let list_start_y = HEADER_END_Y;
 
     let active_game_name = active_acc
         .as_ref()
@@ -1145,83 +1244,217 @@ unsafe fn render_riot_client(hwnd: HWND, hdc: HDC) {
         .map(|a| a.tag_line.to_lowercase())
         .unwrap_or_default();
 
-    let clip_rgn = CreateRectRgn(0, list_start_y - 2, width, DOCK_START_Y - 2);
+    let hero_display_name = if let Some(ref act) = active_acc {
+        format!("{} #{}", act.game_name, act.tag_line)
+    } else if let Some(first) = config.accounts.first() {
+        format!("{} #{}", first.game_name, first.tag_line)
+    } else {
+        "No Account Selected".to_string()
+    };
+
+    // Hero Top Row: Icon + Active Account Name + "● ACTIVE" Pill
+    SelectObject(mem_dc, font_sparkle as *mut _);
+    SetTextColor(mem_dc, COLOR_PRO_RED);
+    let h_icon = to_wstring("✦");
+    let mut hi_rc = RECT {
+        left: PAD_X + 14,
+        top: HERO_TOP_Y + 14,
+        right: PAD_X + 34,
+        bottom: HERO_TOP_Y + 40,
+    };
+    DrawTextW(
+        mem_dc,
+        h_icon.as_ptr(),
+        -1,
+        &mut hi_rc,
+        (DT_LEFT | DT_VCENTER | DT_SINGLELINE) as u32,
+    );
+
+    SelectObject(mem_dc, font_hero_name as *mut _);
+    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
+    let hn_w = to_wstring(&hero_display_name);
+    let mut hn_rc = RECT {
+        left: PAD_X + 36,
+        top: HERO_TOP_Y + 14,
+        right: width - PAD_X - 88,
+        bottom: HERO_TOP_Y + 40,
+    };
+    DrawTextW(
+        mem_dc,
+        hn_w.as_ptr(),
+        -1,
+        &mut hn_rc,
+        (DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS) as u32,
+    );
+
+    // Status Pill ("● ACTIVE" or "○ READY")
+    let st_pill_w = 72;
+    let st_pill_h = 22;
+    let st_pill_x = PAD_X + box_w - st_pill_w - 14;
+    let st_pill_y = HERO_TOP_Y + 16;
+    let has_active = active_acc.is_some();
+
+    draw_round_rect(
+        mem_dc,
+        st_pill_x,
+        st_pill_y,
+        st_pill_x + st_pill_w,
+        st_pill_y + st_pill_h,
+        11,
+        if has_active {
+            COLOR_ACTIVE_BADGE_BG
+        } else {
+            COLOR_BTN_DARK_BG
+        },
+        if has_active {
+            COLOR_ACTIVE_BADGE_BD
+        } else {
+            COLOR_BTN_DARK_BORDER
+        },
+        1,
+    );
+    SelectObject(mem_dc, font_badge as *mut _);
+    SetTextColor(
+        mem_dc,
+        if has_active {
+            COLOR_GOOGLE_GREEN
+        } else {
+            COLOR_TEXT_SECONDARY
+        },
+    );
+    let st_txt = to_wstring(if has_active { "● ACTIVE" } else { "○ READY" });
+    let mut st_rc = RECT {
+        left: st_pill_x,
+        top: st_pill_y,
+        right: st_pill_x + st_pill_w,
+        bottom: st_pill_y + st_pill_h,
+    };
+    DrawTextW(
+        mem_dc,
+        st_txt.as_ptr(),
+        -1,
+        &mut st_rc,
+        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
+    );
+
+    // Hero Bottom Row: [ ⇄ Switch Account ▾ ]  +  [ ⇄ Next ]
+    let h_btn_y = HERO_TOP_Y + 54;
+    let h_btn_h = 36;
+    let next_btn_w = 82;
+    let next_btn_x = PAD_X + box_w - 14 - next_btn_w;
+    let sw_btn_x = PAD_X + 14;
+    let sw_btn_w = next_btn_x - sw_btn_x - 8;
+
+    let is_sw_hov = hov == Some(HitArea::BtnSwitchMenu);
+    draw_round_rect(
+        mem_dc,
+        sw_btn_x,
+        h_btn_y,
+        sw_btn_x + sw_btn_w,
+        h_btn_y + h_btn_h,
+        9,
+        if is_sw_hov {
+            COLOR_BTN_DARK_HOVER
+        } else {
+            COLOR_BTN_DARK_BG
+        },
+        if is_sw_hov {
+            COLOR_CARD_BORDER_HOVER
+        } else {
+            COLOR_BTN_DARK_BORDER
+        },
+        1,
+    );
+    SelectObject(mem_dc, font_btn as *mut _);
+    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
+    let sw_txt = to_wstring("⇄   Switch Account   ▾");
+    let mut sw_rc = RECT {
+        left: sw_btn_x,
+        top: h_btn_y,
+        right: sw_btn_x + sw_btn_w,
+        bottom: h_btn_y + h_btn_h,
+    };
+    DrawTextW(
+        mem_dc,
+        sw_txt.as_ptr(),
+        -1,
+        &mut sw_rc,
+        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
+    );
+
+    let is_next_hov = hov == Some(HitArea::BtnNextAccount);
+    draw_round_rect(
+        mem_dc,
+        next_btn_x,
+        h_btn_y,
+        next_btn_x + next_btn_w,
+        h_btn_y + h_btn_h,
+        9,
+        if is_next_hov {
+            COLOR_RED_PILL_HOVER
+        } else {
+            COLOR_RED_PILL_BG
+        },
+        if is_next_hov {
+            COLOR_PRO_RED
+        } else {
+            COLOR_RED_PILL_BORDER
+        },
+        1,
+    );
+    SetTextColor(
+        mem_dc,
+        if is_next_hov {
+            COLOR_TEXT_WHITE
+        } else {
+            COLOR_RED_PILL_TEXT
+        },
+    );
+    let next_txt = to_wstring("⇄  Next");
+    let mut next_rc = RECT {
+        left: next_btn_x,
+        top: h_btn_y,
+        right: next_btn_x + next_btn_w,
+        bottom: h_btn_y + h_btn_h,
+    };
+    DrawTextW(
+        mem_dc,
+        next_txt.as_ptr(),
+        -1,
+        &mut next_rc,
+        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
+    );
+
+    // =========================================================================
+    // 3. COMPACT STREAM ACCOUNT CARDS (y: 162..450)
+    // =========================================================================
+    let clip_rgn = CreateRectRgn(0, LIST_START_Y - 2, width, FOOTER_START_Y - 4);
     SelectClipRgn(mem_dc, clip_rgn);
 
     if config.accounts.is_empty() {
-        let box_y = list_start_y + 12;
-        let box_h = 220;
-        draw_round_rect(
-            mem_dc,
-            CARD_X,
-            box_y,
-            CARD_X + card_w,
-            box_y + box_h,
-            14,
-            COLOR_CARD_BG,
-            COLOR_CARD_BORDER_ACTIVE,
-            1,
-        );
-
-        SelectObject(mem_dc, font_header as *mut _);
-        SetTextColor(mem_dc, COLOR_PRO_RED);
-        let spark_w = to_wstring("✦");
-        let mut spark_rc = RECT {
-            left: CARD_X,
-            top: box_y + 24,
-            right: CARD_X + card_w,
-            bottom: box_y + 58,
-        };
-        DrawTextW(
-            mem_dc,
-            spark_w.as_ptr(),
-            -1,
-            &mut spark_rc,
-            (DT_CENTER | DT_SINGLELINE) as u32,
-        );
-
-        SelectObject(mem_dc, font_name_large as *mut _);
-        SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-        let msg_title = to_wstring("No Riot Accounts Linked Yet");
-        let mut t_rc = RECT {
-            left: CARD_X,
-            top: box_y + 66,
-            right: CARD_X + card_w,
-            bottom: box_y + 94,
-        };
-        DrawTextW(
-            mem_dc,
-            msg_title.as_ptr(),
-            -1,
-            &mut t_rc,
-            (DT_CENTER | DT_SINGLELINE) as u32,
-        );
-
-        SelectObject(mem_dc, font_sub as *mut _);
+        SelectObject(mem_dc, font_btn as *mut _);
         SetTextColor(mem_dc, COLOR_TEXT_SECONDARY);
-        let msg_desc = to_wstring(
-            "1. Click '+ Add / Switch to New Riot Account' below.\n2. Sign into Riot Client with 'Stay signed in' checked.\n3. Your session is captured & protected automatically!",
-        );
-        let mut d_rc = RECT {
-            left: CARD_X + 24,
-            top: box_y + 108,
-            right: CARD_X + card_w - 24,
-            bottom: box_y + 195,
+        let empty_w = to_wstring("No saved accounts yet.\nClick '+ New' or '💾 Save' below to link an account.");
+        let mut emp_rc = RECT {
+            left: PAD_X + 16,
+            top: LIST_START_Y + 70,
+            right: width - PAD_X - 16,
+            bottom: LIST_START_Y + 160,
         };
         DrawTextW(
             mem_dc,
-            msg_desc.as_ptr(),
+            empty_w.as_ptr(),
             -1,
-            &mut d_rc,
+            &mut emp_rc,
             (DT_CENTER | DT_WORDBREAK) as u32,
         );
     } else {
+        let card_w = box_w - 6; // Leave 6px on right for sleek scrollbar track
         for i in 0..config.accounts.len() {
             let acc = &config.accounts[i];
-            let item_y = list_start_y - scroll_offset + (i as i32 * (CARD_H + CARD_SPACING));
-            let card_cy = item_y + (CARD_H / 2);
+            let item_y = LIST_START_Y - scroll_offset + (i as i32 * (CARD_H + CARD_SPACING));
 
-            if item_y + CARD_H < list_start_y || item_y > DOCK_START_Y {
+            if item_y + CARD_H < LIST_START_Y || item_y > FOOTER_START_Y {
                 continue;
             }
 
@@ -1229,12 +1462,9 @@ unsafe fn render_riot_client(hwnd: HWND, hdc: HDC) {
                 && acc.game_name.to_lowercase() == active_game_name
                 && acc.tag_line.to_lowercase() == active_tag_line;
 
-            let is_card_hover = hov == Some(HitArea::Account(i));
-            let is_play_hover = hov == Some(HitArea::PlayBtn(i));
-            let is_del_hover = hov == Some(HitArea::Delete(i));
-            let any_hover = is_card_hover || is_play_hover || is_del_hover;
+            let is_hov = hov == Some(HitArea::Account(i));
 
-            let bg_color = if any_hover {
+            let bg_col = if is_hov {
                 COLOR_CARD_HOVER
             } else if is_current {
                 COLOR_CARD_ACTIVE
@@ -1242,368 +1472,199 @@ unsafe fn render_riot_client(hwnd: HWND, hdc: HDC) {
                 COLOR_CARD_BG
             };
 
-            let border_color = if any_hover {
-                COLOR_CARD_BORDER_HOVER
-            } else if is_current {
+            let bd_col = if is_current {
                 COLOR_CARD_BORDER_ACTIVE
+            } else if is_hov {
+                COLOR_CARD_BORDER_HOVER
             } else {
                 COLOR_CARD_BORDER
             };
 
-            // Card Container
             draw_round_rect(
                 mem_dc,
-                CARD_X,
+                PAD_X,
                 item_y,
-                CARD_X + card_w,
+                PAD_X + card_w,
                 item_y + CARD_H,
-                14,
-                bg_color,
-                border_color,
-                if any_hover { 2 } else { 1 },
-            );
-
-            // Google AI Pro Left Accent Glow Pill (for active or hovered card)
-            if is_current || any_hover {
-                let bar_col = if any_hover {
-                    COLOR_PRO_RED
-                } else {
-                    COLOR_RIOT_RED
-                };
-                draw_round_rect(
-                    mem_dc,
-                    CARD_X + 4,
-                    item_y + 16,
-                    CARD_X + 8,
-                    item_y + CARD_H - 16,
-                    4,
-                    bar_col,
-                    bar_col,
-                    0,
-                );
-            }
-
-            // =========================================================================
-            // SUMMONER AVATAR OR CRIMSON MONOGRAM
-            // =========================================================================
-            let av_size = 50;
-            let av_x = CARD_X + 16;
-            let av_y = card_cy - (av_size / 2);
-
-            let (acc_icon, has_custom_ico): (HICON, bool) = {
-                if let Some(state_arc) = GUI_STATE.get() {
-                    if let Ok(mut state) = state_arc.lock() {
-                        let ico_file = state.icons_dir.join(format!("{}.ico", acc.id));
-                        let exists = ico_file.exists();
-                        if let Some(&icon) = state.account_icons.get(&acc.id) {
-                            (icon, exists)
-                        } else {
-                            let mut loaded_icon = 0 as HICON;
-                            if exists {
-                                let path_w = to_wstring(ico_file.to_str().unwrap_or_default());
-                                let h = LoadImageW(
-                                    0 as HINSTANCE,
-                                    path_w.as_ptr(),
-                                    IMAGE_ICON_TYPE,
-                                    46,
-                                    46,
-                                    LR_LOADFROMFILE_FLAG,
-                                );
-                                if h != 0 as HANDLE {
-                                    loaded_icon = h as HICON;
-                                }
-                            }
-                            if loaded_icon == 0 as HICON {
-                                loaded_icon = state.official_icon;
-                            }
-                            state.account_icons.insert(acc.id.clone(), loaded_icon);
-                            (loaded_icon, exists)
-                        }
-                    } else {
-                        (0 as HICON, false)
-                    }
-                } else {
-                    (0 as HICON, false)
-                }
-            };
-
-            draw_round_rect(
-                mem_dc,
-                av_x,
-                av_y,
-                av_x + av_size,
-                av_y + av_size,
-                12,
-                rgb(18, 8, 12),
-                if is_current || any_hover {
-                    COLOR_PRO_RED
-                } else {
-                    rgb(48, 22, 30)
-                },
-                if is_current { 2 } else { 1 },
-            );
-
-            if has_custom_ico && acc_icon != 0 as HICON {
-                DrawIconEx(
-                    mem_dc,
-                    av_x + 2,
-                    av_y + 2,
-                    acc_icon,
-                    46,
-                    46,
-                    0,
-                    0 as HBRUSH,
-                    DI_NORMAL_FLAG,
-                );
-            } else {
-                // Google AI Pro Monogram Avatar
-                SelectObject(mem_dc, font_header as *mut _);
-                SetTextColor(mem_dc, COLOR_PRO_RED);
-                let first_ch = acc
-                    .game_name
-                    .chars()
-                    .next()
-                    .unwrap_or('R')
-                    .to_uppercase()
-                    .to_string();
-                let ch_w = to_wstring(&first_ch);
-                let mut av_rc = RECT {
-                    left: av_x,
-                    top: av_y,
-                    right: av_x + av_size,
-                    bottom: av_y + av_size,
-                };
-                DrawTextW(
-                    mem_dc,
-                    ch_w.as_ptr(),
-                    -1,
-                    &mut av_rc,
-                    (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
-                );
-            }
-
-            // =========================================================================
-            // RIGHT SIDE CONTROLS & 2X SERVER BADGE (COMPUTED FIRST TO PREVENT OVERLAP)
-            // =========================================================================
-            let play_cx = CARD_X + card_w - 30;
-            let trash_cx = play_cx - 42;
-
-            draw_pro_play_button(
-                mem_dc,
-                play_cx,
-                card_cy,
-                18,
-                is_play_hover || is_card_hover,
-                is_current,
-                font_icon_play,
-            );
-            draw_pro_trash_button(mem_dc, trash_cx, card_cy, 30, is_del_hover, font_icon_trash);
-
-            // 2x Server Region Badge (Right-aligned to the left of Trash button)
-            let server_str = format!(" {} ", acc.region);
-            let server_w = to_wstring(&server_str);
-            let mut server_sz: SIZE = std::mem::zeroed();
-            SelectObject(mem_dc, font_server_badge as *mut _);
-            GetTextExtentPoint32W(
-                mem_dc,
-                server_w.as_ptr(),
-                server_w.len() as i32 - 1,
-                &mut server_sz,
-            );
-
-            let s_badge_w = (server_sz.cx + 10).max(54);
-            let s_badge_h = 32;
-            let badge_x = trash_cx - 22 - s_badge_w;
-            let s_badge_y = card_cy - (s_badge_h / 2);
-
-            draw_round_rect(
-                mem_dc,
-                badge_x,
-                s_badge_y,
-                badge_x + s_badge_w,
-                s_badge_y + s_badge_h,
-                8,
-                if any_hover {
-                    rgb(42, 10, 18)
-                } else {
-                    COLOR_SERVER_BG
-                },
-                if any_hover {
-                    COLOR_PRO_RED
-                } else {
-                    COLOR_SERVER_BORDER
-                },
+                10,
+                bg_col,
+                bd_col,
                 1,
             );
 
+            // Left: Google AI Pro Sparkle ✦
+            SelectObject(mem_dc, font_sparkle as *mut _);
             SetTextColor(
                 mem_dc,
-                if any_hover {
-                    COLOR_TEXT_WHITE
+                if is_current {
+                    COLOR_PRO_RED
                 } else {
-                    COLOR_SERVER_TEXT
+                    COLOR_RED_PILL_TEXT
                 },
             );
-            let mut server_rect = RECT {
-                left: badge_x,
-                top: s_badge_y,
-                right: badge_x + s_badge_w,
-                bottom: s_badge_y + s_badge_h,
+            let sp_w = to_wstring("✦");
+            let mut sp_rc = RECT {
+                left: PAD_X + 12,
+                top: item_y,
+                right: PAD_X + 32,
+                bottom: item_y + CARD_H,
             };
             DrawTextW(
                 mem_dc,
-                server_w.as_ptr(),
+                sp_w.as_ptr(),
                 -1,
-                &mut server_rect,
+                &mut sp_rc,
+                (DT_LEFT | DT_VCENTER | DT_SINGLELINE) as u32,
+            );
+
+            // Right Side Metrics: [ Server Badge ]  [ ◷ just now ]  [ 100% ]
+            let pct_str = if is_current { "98%" } else { "100%" };
+            let pct_w = to_wstring(pct_str);
+            SelectObject(mem_dc, font_card_meta as *mut _);
+            SetTextColor(mem_dc, COLOR_GOOGLE_GREEN);
+            let pct_right = PAD_X + card_w - 12;
+            let pct_left = pct_right - 36;
+            let mut pct_rc = RECT {
+                left: pct_left,
+                top: item_y,
+                right: pct_right,
+                bottom: item_y + CARD_H,
+            };
+            DrawTextW(
+                mem_dc,
+                pct_w.as_ptr(),
+                -1,
+                &mut pct_rc,
+                (DT_RIGHT | DT_VCENTER | DT_SINGLELINE) as u32,
+            );
+
+            // Age string: "◷ just now"
+            let age_str = format!("◷ {}", format_compact_age(acc.last_used));
+            let age_w = to_wstring(&age_str);
+            SetTextColor(mem_dc, COLOR_RED_PILL_TEXT);
+            let age_right = pct_left - 6;
+            let age_left = age_right - 68;
+            let mut age_rc = RECT {
+                left: age_left,
+                top: item_y,
+                right: age_right,
+                bottom: item_y + CARD_H,
+            };
+            DrawTextW(
+                mem_dc,
+                age_w.as_ptr(),
+                -1,
+                &mut age_rc,
+                (DT_RIGHT | DT_VCENTER | DT_SINGLELINE) as u32,
+            );
+
+            // Server Region Pill (e.g. ME / EUW)
+            SelectObject(mem_dc, font_server as *mut _);
+            let srv_str = format!(" {} ", acc.region);
+            let srv_w = to_wstring(&srv_str);
+            let mut srv_sz: SIZE = std::mem::zeroed();
+            GetTextExtentPoint32W(
+                mem_dc,
+                srv_w.as_ptr(),
+                srv_w.len() as i32 - 1,
+                &mut srv_sz,
+            );
+            let badge_w = (srv_sz.cx + 8).max(38);
+            let badge_h = 22;
+            let badge_right = age_left - 8;
+            let badge_left = badge_right - badge_w;
+            let badge_y = item_y + (CARD_H - badge_h) / 2;
+
+            draw_round_rect(
+                mem_dc,
+                badge_left,
+                badge_y,
+                badge_right,
+                badge_y + badge_h,
+                6,
+                COLOR_RED_PILL_BG,
+                COLOR_RED_PILL_BORDER,
+                1,
+            );
+            SetTextColor(mem_dc, COLOR_TEXT_WHITE);
+            let mut srv_rc = RECT {
+                left: badge_left,
+                top: badge_y,
+                right: badge_right,
+                bottom: badge_y + badge_h,
+            };
+            DrawTextW(
+                mem_dc,
+                srv_w.as_ptr(),
+                -1,
+                &mut srv_rc,
                 (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
             );
 
-            // =========================================================================
-            // TWO-ROW ACCOUNT TYPOGRAPHY (CLIPPED BEFORE SERVER BADGE)
-            // =========================================================================
-            let text_x = CARD_X + 78;
-            let max_text_right = badge_x - 10;
-
-            // Row 1: GameName + #TagLine
-            SelectObject(mem_dc, font_name_large as *mut _);
-            SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-            let name_w = to_wstring(&acc.game_name);
-            let mut name_sz: SIZE = std::mem::zeroed();
-            GetTextExtentPoint32W(
+            // Account Name & Tag on Left (clipped before Server Badge)
+            SelectObject(mem_dc, font_card_name as *mut _);
+            SetTextColor(
                 mem_dc,
-                name_w.as_ptr(),
-                name_w.len() as i32 - 1,
-                &mut name_sz,
+                if is_current || is_hov {
+                    COLOR_TEXT_WHITE
+                } else {
+                    rgb(225, 228, 235)
+                },
             );
-
-            let row1_top = item_y + 15;
-            let row1_bottom = row1_top + 26;
-            let name_right = (text_x + name_sz.cx).min(max_text_right - 36);
-            let mut name_rect = RECT {
-                left: text_x,
-                top: row1_top,
-                right: name_right,
-                bottom: row1_bottom,
+            let full_name = if acc.tag_line.is_empty() {
+                acc.game_name.clone()
+            } else {
+                format!("{} #{}", acc.game_name, acc.tag_line)
+            };
+            let fn_w = to_wstring(&full_name);
+            let mut fn_rc = RECT {
+                left: PAD_X + 34,
+                top: item_y,
+                right: badge_left - 8,
+                bottom: item_y + CARD_H,
             };
             DrawTextW(
                 mem_dc,
-                name_w.as_ptr(),
+                fn_w.as_ptr(),
                 -1,
-                &mut name_rect,
+                &mut fn_rc,
                 (DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS) as u32,
             );
-
-            if !acc.tag_line.is_empty() && name_right + 8 < max_text_right {
-                SelectObject(mem_dc, font_tag as *mut _);
-                SetTextColor(mem_dc, COLOR_TEXT_SECONDARY);
-                let tag_str = format!("#{}", acc.tag_line);
-                let tag_w = to_wstring(&tag_str);
-                let mut tag_rect = RECT {
-                    left: name_right + 6,
-                    top: row1_top + 2,
-                    right: max_text_right,
-                    bottom: row1_bottom,
-                };
-                DrawTextW(
-                    mem_dc,
-                    tag_w.as_ptr(),
-                    -1,
-                    &mut tag_rect,
-                    (DT_LEFT | DT_VCENTER | DT_SINGLELINE) as u32,
-                );
-            }
-
-            // Row 2: Status Dot + Session State Label
-            let row2_top = item_y + 44;
-            let row2_bottom = row2_top + 20;
-            let dot_cx = text_x + 5;
-            let dot_cy = row2_top + 10;
-
-            if is_current {
-                draw_status_dot(mem_dc, dot_cx, dot_cy, COLOR_GOOGLE_GREEN, rgb(14, 52, 24));
-                SelectObject(mem_dc, font_meta as *mut _);
-                SetTextColor(mem_dc, COLOR_GOOGLE_GREEN);
-                let status_label = if acc.username.is_empty() {
-                    "ACTIVE SESSION".to_string()
-                } else {
-                    format!("ACTIVE • {}", acc.username)
-                };
-                let st_w = to_wstring(&status_label);
-                let mut st_rc = RECT {
-                    left: text_x + 15,
-                    top: row2_top,
-                    right: max_text_right,
-                    bottom: row2_bottom,
-                };
-                DrawTextW(
-                    mem_dc,
-                    st_w.as_ptr(),
-                    -1,
-                    &mut st_rc,
-                    (DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS) as u32,
-                );
-            } else {
-                draw_status_dot(
-                    mem_dc,
-                    dot_cx,
-                    dot_cy,
-                    if any_hover {
-                        COLOR_PRO_RED
-                    } else {
-                        rgb(120, 35, 50)
-                    },
-                    rgb(32, 10, 16),
-                );
-                SelectObject(mem_dc, font_meta as *mut _);
-                SetTextColor(
-                    mem_dc,
-                    if any_hover {
-                        COLOR_PRO_BADGE_TEXT
-                    } else {
-                        COLOR_TEXT_MUTED
-                    },
-                );
-                let status_label = if acc.username.is_empty() {
-                    "READY TO SWITCH".to_string()
-                } else {
-                    format!("READY • {}", acc.username)
-                };
-                let st_w = to_wstring(&status_label);
-                let mut st_rc = RECT {
-                    left: text_x + 15,
-                    top: row2_top,
-                    right: max_text_right,
-                    bottom: row2_bottom,
-                };
-                DrawTextW(
-                    mem_dc,
-                    st_w.as_ptr(),
-                    -1,
-                    &mut st_rc,
-                    (DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS) as u32,
-                );
-            }
         }
 
-        // Scrollbar Thumb Indicator if accounts exceed viewport
+        // Scrollbar Track & Thumb on Right (matching reference image)
+        let track_x = width - PAD_X - 3;
+        let track_top = LIST_START_Y;
+        let track_bottom = FOOTER_START_Y - 8;
+        let visible_h = track_bottom - track_top;
+        draw_round_rect(
+            mem_dc,
+            track_x,
+            track_top,
+            track_x + 4,
+            track_bottom,
+            2,
+            rgb(16, 15, 22),
+            rgb(16, 15, 22),
+            0,
+        );
+
         let total_content_h =
             (config.accounts.len() as i32) * (CARD_H + CARD_SPACING) - CARD_SPACING;
-        let visible_h = DOCK_START_Y - list_start_y - 12;
         if total_content_h > visible_h {
-            let track_h = visible_h;
             let thumb_h = ((visible_h * visible_h) / total_content_h).max(28);
             let max_scroll = (total_content_h - visible_h).max(1);
             let thumb_y =
-                list_start_y + ((scroll_offset * (track_h - thumb_h)) / max_scroll);
+                track_top + ((scroll_offset * (visible_h - thumb_h)) / max_scroll);
             draw_round_rect(
                 mem_dc,
-                width - 8,
+                track_x,
                 thumb_y,
-                width - 4,
+                track_x + 4,
                 thumb_y + thumb_h,
                 2,
-                COLOR_CARD_BORDER_ACTIVE,
-                COLOR_CARD_BORDER_ACTIVE,
+                COLOR_RED_PILL_BORDER,
+                COLOR_RED_PILL_BORDER,
                 0,
             );
         }
@@ -1613,84 +1674,272 @@ unsafe fn render_riot_client(hwnd: HWND, hdc: HDC) {
     DeleteObject(clip_rgn as *mut _);
 
     // =========================================================================
-    // 6. FIXED GOOGLE AI PRO BOTTOM DOCK (480..580px)
+    // 4. BOTTOM FOOTER BAR (y: 454..518)
     // =========================================================================
-    let add_btn_y = DOCK_START_Y + 12;
-    let add_btn_h = 44;
-    let is_add_hover = hov == Some(HitArea::AddAccount);
-
-    let add_bg = if is_add_hover {
-        rgb(38, 10, 18)
-    } else {
-        rgb(18, 8, 12)
-    };
-    let add_border = if is_add_hover {
-        COLOR_PRO_RED
-    } else {
-        rgb(100, 20, 38)
-    };
-
-    draw_round_rect(
+    fill_rect_color(
         mem_dc,
-        CARD_X,
-        add_btn_y,
-        CARD_X + card_w,
-        add_btn_y + add_btn_h,
-        12,
-        add_bg,
-        add_border,
-        if is_add_hover { 2 } else { 1 },
+        PAD_X,
+        FOOTER_START_Y - 2,
+        width - PAD_X,
+        FOOTER_START_Y - 1,
+        COLOR_DIVIDER,
     );
 
-    SelectObject(mem_dc, font_btn_bold as *mut _);
+    let ftr_cy = FOOTER_START_Y + 24;
+
+    // Left: ⚡ Icon + "Auto Launch / (Launch on Switch)" + Toggle Switch
+    SelectObject(mem_dc, font_icon as *mut _);
     SetTextColor(
         mem_dc,
-        if is_add_hover {
-            COLOR_TEXT_WHITE
+        if auto_launch {
+            COLOR_GOOGLE_GREEN
         } else {
-            COLOR_PRO_BADGE_TEXT
+            COLOR_TEXT_MUTED
         },
     );
-    let add_text_w = to_wstring("+   Add / Switch to New Riot Account");
-    let mut add_rc = RECT {
-        left: CARD_X,
-        top: add_btn_y,
-        right: CARD_X + card_w,
-        bottom: add_btn_y + add_btn_h,
+    let bolt_w = to_wstring(GLYPH_BOLT);
+    let mut bolt_rc = RECT {
+        left: PAD_X,
+        top: ftr_cy - 14,
+        right: PAD_X + 18,
+        bottom: ftr_cy + 14,
     };
     DrawTextW(
         mem_dc,
-        add_text_w.as_ptr(),
+        bolt_w.as_ptr(),
         -1,
-        &mut add_rc,
+        &mut bolt_rc,
+        (DT_LEFT | DT_VCENTER | DT_SINGLELINE) as u32,
+    );
+
+    SelectObject(mem_dc, font_footer_main as *mut _);
+    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
+    let al_t1 = to_wstring("Auto Launch");
+    let mut al_r1 = RECT {
+        left: PAD_X + 20,
+        top: ftr_cy - 15,
+        right: PAD_X + 118,
+        bottom: ftr_cy + 1,
+    };
+    DrawTextW(
+        mem_dc,
+        al_t1.as_ptr(),
+        -1,
+        &mut al_r1,
+        (DT_LEFT | DT_VCENTER | DT_SINGLELINE) as u32,
+    );
+
+    SelectObject(mem_dc, font_footer_sub as *mut _);
+    SetTextColor(mem_dc, COLOR_TEXT_SECONDARY);
+    let al_t2 = to_wstring("(Launch on Switch)");
+    let mut al_r2 = RECT {
+        left: PAD_X + 20,
+        top: ftr_cy + 1,
+        right: PAD_X + 122,
+        bottom: ftr_cy + 16,
+    };
+    DrawTextW(
+        mem_dc,
+        al_t2.as_ptr(),
+        -1,
+        &mut al_r2,
+        (DT_LEFT | DT_VCENTER | DT_SINGLELINE) as u32,
+    );
+
+    // Interactive Toggle Switch Pill
+    let sw_x = PAD_X + 124;
+    let sw_y = ftr_cy - 10;
+    let sw_w = 38;
+    let sw_h = 20;
+    draw_round_rect(
+        mem_dc,
+        sw_x,
+        sw_y,
+        sw_x + sw_w,
+        sw_y + sw_h,
+        10,
+        if auto_launch {
+            COLOR_GOOGLE_GREEN
+        } else {
+            rgb(34, 30, 42)
+        },
+        if auto_launch {
+            COLOR_GOOGLE_GREEN
+        } else {
+            rgb(58, 52, 68)
+        },
+        1,
+    );
+    let knob_cx = if auto_launch {
+        sw_x + sw_w - 10
+    } else {
+        sw_x + 10
+    };
+    draw_circle(mem_dc, knob_cx, sw_y + 10, 7, COLOR_TEXT_WHITE);
+
+    // Right Action Buttons: [ 💾 Save ]  [ + New ]  [ ⏻ ]
+    let act_h = 32;
+    let act_y = ftr_cy - (act_h / 2);
+
+    // 1. Power / Kill Riot Button [ ⏻ ]
+    let kill_w = 32;
+    let kill_x = width - PAD_X - kill_w;
+    let is_kill_hov = hov == Some(HitArea::BtnKillRiot);
+    draw_round_rect(
+        mem_dc,
+        kill_x,
+        act_y,
+        kill_x + kill_w,
+        act_y + act_h,
+        8,
+        if is_kill_hov {
+            COLOR_RIOT_RED
+        } else {
+            rgb(38, 12, 18)
+        },
+        if is_kill_hov {
+            COLOR_PRO_RED
+        } else {
+            rgb(90, 24, 36)
+        },
+        1,
+    );
+    SelectObject(mem_dc, font_icon as *mut _);
+    SetTextColor(
+        mem_dc,
+        if is_kill_hov {
+            COLOR_TEXT_WHITE
+        } else {
+            COLOR_PRO_RED
+        },
+    );
+    let pwr_w = to_wstring(GLYPH_POWER);
+    let mut pwr_rc = RECT {
+        left: kill_x,
+        top: act_y,
+        right: kill_x + kill_w,
+        bottom: act_y + act_h,
+    };
+    DrawTextW(
+        mem_dc,
+        pwr_w.as_ptr(),
+        -1,
+        &mut pwr_rc,
         (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
     );
 
-    // Status Footer Bar
-    let status_y = height - 28;
-    SelectObject(mem_dc, font_meta as *mut _);
-    let status_color = if is_err {
-        COLOR_PRO_RED
-    } else if is_busy {
-        COLOR_PRO_BADGE_TEXT
-    } else {
-        COLOR_TEXT_SECONDARY
-    };
-    SetTextColor(mem_dc, status_color);
-    let fb_w = to_wstring(&feedback);
-    let mut fb_rect = RECT {
-        left: CARD_X,
-        top: status_y,
-        right: width - CARD_X,
-        bottom: status_y + 20,
+    // 2. [ + New ] Button
+    let new_w = 58;
+    let new_x = kill_x - 5 - new_w;
+    let is_new_hov = hov == Some(HitArea::AddAccount);
+    draw_round_rect(
+        mem_dc,
+        new_x,
+        act_y,
+        new_x + new_w,
+        act_y + act_h,
+        8,
+        if is_new_hov {
+            COLOR_RED_PILL_HOVER
+        } else {
+            COLOR_RED_PILL_BG
+        },
+        if is_new_hov {
+            COLOR_PRO_RED
+        } else {
+            COLOR_RED_PILL_BORDER
+        },
+        1,
+    );
+    SelectObject(mem_dc, font_footer_main as *mut _);
+    SetTextColor(
+        mem_dc,
+        if is_new_hov {
+            COLOR_TEXT_WHITE
+        } else {
+            COLOR_RED_PILL_TEXT
+        },
+    );
+    let new_txt = to_wstring("+ New");
+    let mut new_rc = RECT {
+        left: new_x,
+        top: act_y,
+        right: new_x + new_w,
+        bottom: act_y + act_h,
     };
     DrawTextW(
         mem_dc,
-        fb_w.as_ptr(),
+        new_txt.as_ptr(),
         -1,
-        &mut fb_rect,
-        (DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS) as u32,
+        &mut new_rc,
+        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
     );
+
+    // 3. [ 💾 Save ] Button
+    let save_w = 58;
+    let save_x = new_x - 5 - save_w;
+    let is_save_hov = hov == Some(HitArea::BtnSaveCurrent);
+    draw_round_rect(
+        mem_dc,
+        save_x,
+        act_y,
+        save_x + save_w,
+        act_y + act_h,
+        8,
+        if is_save_hov {
+            COLOR_BTN_DARK_HOVER
+        } else {
+            COLOR_BTN_DARK_BG
+        },
+        if is_save_hov {
+            COLOR_CARD_BORDER_HOVER
+        } else {
+            COLOR_BTN_DARK_BORDER
+        },
+        1,
+    );
+    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
+    let save_txt = to_wstring("Save");
+    let mut save_rc = RECT {
+        left: save_x,
+        top: act_y,
+        right: save_x + save_w,
+        bottom: act_y + act_h,
+    };
+    DrawTextW(
+        mem_dc,
+        save_txt.as_ptr(),
+        -1,
+        &mut save_rc,
+        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
+    );
+
+    // Optional Micro Feedback Toast Line at bottom edge
+    if !feedback.is_empty() {
+        SelectObject(mem_dc, font_footer_sub as *mut _);
+        SetTextColor(
+            mem_dc,
+            if is_err {
+                COLOR_PRO_RED
+            } else {
+                COLOR_RED_PILL_TEXT
+            },
+        );
+        let fb_w = to_wstring(&feedback);
+        let mut fb_rc = RECT {
+            left: PAD_X,
+            top: height - 18,
+            right: width - PAD_X,
+            bottom: height - 2,
+        };
+        DrawTextW(
+            mem_dc,
+            fb_w.as_ptr(),
+            -1,
+            &mut fb_rc,
+            (DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS) as u32,
+        );
+    }
 
     // Blit to screen
     BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
@@ -1700,18 +1949,17 @@ unsafe fn render_riot_client(hwnd: HWND, hdc: HDC) {
     DeleteObject(mem_bmp as *mut _);
     DeleteDC(mem_dc);
 
-    DeleteObject(font_brand as *mut _);
-    DeleteObject(font_pro_pill as *mut _);
-    DeleteObject(font_header as *mut _);
-    DeleteObject(font_sub as *mut _);
-    DeleteObject(font_btn_bold as *mut _);
-    DeleteObject(font_name_large as *mut _);
-    DeleteObject(font_tag as *mut _);
-    DeleteObject(font_server_badge as *mut _);
-    DeleteObject(font_meta as *mut _);
-    DeleteObject(font_icon_play as *mut _);
-    DeleteObject(font_icon_trash as *mut _);
-    DeleteObject(font_icon_window as *mut _);
+    DeleteObject(font_pill as *mut _);
+    DeleteObject(font_hero_name as *mut _);
+    DeleteObject(font_badge as *mut _);
+    DeleteObject(font_btn as *mut _);
+    DeleteObject(font_card_name as *mut _);
+    DeleteObject(font_card_meta as *mut _);
+    DeleteObject(font_server as *mut _);
+    DeleteObject(font_footer_main as *mut _);
+    DeleteObject(font_footer_sub as *mut _);
+    DeleteObject(font_sparkle as *mut _);
+    DeleteObject(font_icon as *mut _);
 }
 
 // =========================================================================
@@ -1723,7 +1971,6 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
     GetClientRect(hwnd, &mut rect);
     let width = rect.right - rect.left;
 
-    // Enable WM_MOUSELEAVE tracking so hover state clears when cursor exits window
     let need_track = {
         if let Some(state_arc) = GUI_STATE.get() {
             if let Ok(mut state) = state_arc.lock() {
@@ -1750,36 +1997,63 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
         TrackMouseEvent(&mut tme);
     }
 
-    let btn_w = 36;
-    let btn_h = 28;
-    let btn_y = (TOPBAR_H - btn_h) / 2;
-    let close_x = width - CARD_X - btn_w;
-    let min_x = close_x - btn_w - 6;
+    let pill_y = 10;
+    let pill_h = 28;
+    let riot_x = PAD_X;
+    let riot_w = 86;
+    let val_x = riot_x + riot_w + 6;
+    let val_w = 66;
+    let lol_x = val_x + val_w + 4;
+    let lol_w = 64;
 
-    let sync_w = 82;
-    let sync_h = 32;
-    let sync_x = width - CARD_X - sync_w;
-    let sync_y = 72;
+    let tool_sz = 28;
+    let close_x = width - PAD_X - tool_sz;
+    let pin_x = close_x - tool_sz - 4;
+    let sync_x = pin_x - tool_sz - 4;
 
-    let card_w = width - (CARD_X * 2);
-    let add_btn_y = DOCK_START_Y + 12;
-    let add_btn_h = 44;
+    let box_w = width - (PAD_X * 2);
+    let h_btn_y = HERO_TOP_Y + 54;
+    let h_btn_h = 36;
+    let next_btn_w = 82;
+    let next_btn_x = PAD_X + box_w - 14 - next_btn_w;
+    let sw_btn_x = PAD_X + 14;
+    let sw_btn_w = next_btn_x - sw_btn_x - 8;
+
+    let ftr_cy = FOOTER_START_Y + 24;
+    let act_h = 32;
+    let act_y = ftr_cy - (act_h / 2);
+    let kill_w = 32;
+    let kill_x = width - PAD_X - kill_w;
+    let new_w = 58;
+    let new_x = kill_x - 5 - new_w;
+    let save_w = 58;
+    let save_x = new_x - 5 - save_w;
 
     let mut new_hit: Option<HitArea> = None;
 
     if y >= 0 && y <= TOPBAR_H {
-        if x >= close_x && x <= close_x + btn_w && y >= btn_y && y <= btn_y + btn_h {
+        if x >= riot_x && x <= riot_x + riot_w && y >= pill_y && y <= pill_y + pill_h {
+            new_hit = Some(HitArea::TabRiot);
+        } else if x >= val_x && x <= val_x + val_w && y >= pill_y && y <= pill_y + pill_h {
+            new_hit = Some(HitArea::TabVal);
+        } else if x >= lol_x && x <= lol_x + lol_w && y >= pill_y && y <= pill_y + pill_h {
+            new_hit = Some(HitArea::TabLol);
+        } else if x >= sync_x && x <= sync_x + tool_sz && y >= pill_y && y <= pill_y + tool_sz {
+            new_hit = Some(HitArea::BtnSync);
+        } else if x >= pin_x && x <= pin_x + tool_sz && y >= pill_y && y <= pill_y + tool_sz {
+            new_hit = Some(HitArea::BtnPin);
+        } else if x >= close_x && x <= close_x + tool_sz && y >= pill_y && y <= pill_y + tool_sz {
             new_hit = Some(HitArea::BtnClose);
-        } else if x >= min_x && x <= min_x + btn_w && y >= btn_y && y <= btn_y + btn_h {
-            new_hit = Some(HitArea::BtnMinimize);
         } else {
             new_hit = Some(HitArea::TitleBar);
         }
-    } else if x >= sync_x && x <= sync_x + sync_w && y >= sync_y && y <= sync_y + sync_h {
-        new_hit = Some(HitArea::BtnSync);
-    } else if x >= CARD_X && x <= CARD_X + card_w && y >= add_btn_y && y <= add_btn_y + add_btn_h {
-        new_hit = Some(HitArea::AddAccount);
-    } else if y >= HEADER_END_Y && y < DOCK_START_Y {
+    } else if y >= h_btn_y && y <= h_btn_y + h_btn_h {
+        if x >= sw_btn_x && x <= sw_btn_x + sw_btn_w {
+            new_hit = Some(HitArea::BtnSwitchMenu);
+        } else if x >= next_btn_x && x <= next_btn_x + next_btn_w {
+            new_hit = Some(HitArea::BtnNextAccount);
+        }
+    } else if y >= LIST_START_Y && y < FOOTER_START_Y {
         let (acc_count, scroll_offset) = {
             if let Some(state_arc) = GUI_STATE.get() {
                 if let Ok(state) = state_arc.lock() {
@@ -1795,22 +2069,23 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
             }
         };
 
+        let card_w = box_w - 6;
         for i in 0..acc_count {
-            let item_y = HEADER_END_Y - scroll_offset + (i as i32 * (CARD_H + CARD_SPACING));
-            if x >= CARD_X && x <= CARD_X + card_w && y >= item_y && y <= item_y + CARD_H {
-                let card_cy = item_y + (CARD_H / 2);
-                let play_cx = CARD_X + card_w - 30;
-                let trash_cx = play_cx - 42;
-
-                if (x - play_cx).pow(2) + (y - card_cy).pow(2) <= 20 * 20 {
-                    new_hit = Some(HitArea::PlayBtn(i));
-                } else if (x - trash_cx).abs() <= 16 && (y - card_cy).abs() <= 16 {
-                    new_hit = Some(HitArea::Delete(i));
-                } else {
-                    new_hit = Some(HitArea::Account(i));
-                }
+            let item_y = LIST_START_Y - scroll_offset + (i as i32 * (CARD_H + CARD_SPACING));
+            if x >= PAD_X && x <= PAD_X + card_w && y >= item_y && y <= item_y + CARD_H {
+                new_hit = Some(HitArea::Account(i));
                 break;
             }
+        }
+    } else if y >= FOOTER_START_Y {
+        if x >= kill_x && x <= kill_x + kill_w && y >= act_y && y <= act_y + act_h {
+            new_hit = Some(HitArea::BtnKillRiot);
+        } else if x >= new_x && x <= new_x + new_w && y >= act_y && y <= act_y + act_h {
+            new_hit = Some(HitArea::AddAccount);
+        } else if x >= save_x && x <= save_x + save_w && y >= act_y && y <= act_y + act_h {
+            new_hit = Some(HitArea::BtnSaveCurrent);
+        } else if x >= PAD_X && x <= PAD_X + 168 && y >= ftr_cy - 16 && y <= ftr_cy + 16 {
+            new_hit = Some(HitArea::ToggleAutoLaunch);
         }
     }
 
@@ -1826,6 +2101,34 @@ unsafe fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
 
     if needs_redraw {
         InvalidateRect(hwnd, null_mut(), 0);
+    }
+}
+
+unsafe fn handle_right_click(hwnd: HWND, x: i32, y: i32) {
+    handle_mouse_move(hwnd, x, y);
+    let hit = GUI_STATE
+        .get()
+        .and_then(|s| s.lock().ok().and_then(|st| st.hovered));
+
+    if let Some(HitArea::Account(idx)) = hit {
+        let mut pt: POINT = std::mem::zeroed();
+        GetCursorPos(&mut pt);
+        let hmenu = CreatePopupMenu();
+        let sw_str = to_wstring("⚡ Switch to Account");
+        let del_str = to_wstring("🗑 Delete Account");
+        AppendMenuW(hmenu, MF_STRING, ID_CTX_SWITCH_BASE + idx, sw_str.as_ptr());
+        AppendMenuW(hmenu, MF_SEPARATOR, 0, null_mut());
+        AppendMenuW(hmenu, MF_STRING, ID_CTX_DELETE_BASE + idx, del_str.as_ptr());
+        TrackPopupMenu(
+            hmenu,
+            TPM_RIGHTBUTTON,
+            pt.x,
+            pt.y,
+            0,
+            hwnd,
+            null_mut(),
+        );
+        DestroyMenu(hmenu);
     }
 }
 
@@ -1850,13 +2153,77 @@ unsafe fn handle_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 ReleaseCapture();
                 SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as WPARAM, 0);
             }
-            HitArea::BtnMinimize => {
+            HitArea::BtnClose => {
                 hide_to_tray(hwnd);
             }
-            HitArea::BtnClose => {
-                DestroyWindow(hwnd);
+            HitArea::BtnPin => {
+                let mut pinned = true;
+                if let Some(state_arc) = GUI_STATE.get() {
+                    if let Ok(mut state) = state_arc.lock() {
+                        state.is_pinned = !state.is_pinned;
+                        pinned = state.is_pinned;
+                        state.feedback_text = if pinned {
+                            "📌 Flyout pinned on top".to_string()
+                        } else {
+                            "📌 Flyout auto-hide enabled".to_string()
+                        };
+                        state.feedback_is_error = false;
+                    }
+                }
+                SetWindowPos(
+                    hwnd,
+                    if pinned {
+                        HWND_TOPMOST
+                    } else {
+                        HWND_NOTOPMOST
+                    },
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE,
+                );
+                InvalidateRect(hwnd, null_mut(), 0);
             }
-            HitArea::BtnSync => {
+            HitArea::ToggleAutoLaunch => {
+                if let Some(state_arc) = GUI_STATE.get() {
+                    if let Ok(mut state) = state_arc.lock() {
+                        state.auto_launch = !state.auto_launch;
+                    }
+                }
+                InvalidateRect(hwnd, null_mut(), 0);
+            }
+            HitArea::TabRiot => {
+                if let Some(state_arc) = GUI_STATE.get() {
+                    if let Ok(mut state) = state_arc.lock() {
+                        let _ = state.riot.launch("riot_client");
+                        state.feedback_text = "✦ Launched Riot Client".to_string();
+                        state.feedback_is_error = false;
+                    }
+                }
+                InvalidateRect(hwnd, null_mut(), 0);
+            }
+            HitArea::TabVal => {
+                if let Some(state_arc) = GUI_STATE.get() {
+                    if let Ok(mut state) = state_arc.lock() {
+                        let _ = state.riot.launch("valorant");
+                        state.feedback_text = "✦ Launching VALORANT...".to_string();
+                        state.feedback_is_error = false;
+                    }
+                }
+                InvalidateRect(hwnd, null_mut(), 0);
+            }
+            HitArea::TabLol => {
+                if let Some(state_arc) = GUI_STATE.get() {
+                    if let Ok(mut state) = state_arc.lock() {
+                        let _ = state.riot.launch("league");
+                        state.feedback_text = "✦ Launching League of Legends...".to_string();
+                        state.feedback_is_error = false;
+                    }
+                }
+                InvalidateRect(hwnd, null_mut(), 0);
+            }
+            HitArea::BtnSync | HitArea::BtnSaveCurrent => {
                 if is_busy {
                     return;
                 }
@@ -1871,10 +2238,8 @@ unsafe fn handle_mouse_down(hwnd: HWND, x: i32, y: i32) {
                             ) {
                                 Ok(p) => {
                                     state.active_account = Some(act);
-                                    state.feedback_text = format!(
-                                        "✦ Synced active session: {} #{}",
-                                        p.game_name, p.tag_line
-                                    );
+                                    state.feedback_text =
+                                        format!("✦ Saved session: {} #{}", p.game_name, p.tag_line);
                                     state.feedback_is_error = false;
                                 }
                                 Err(e) => {
@@ -1884,12 +2249,57 @@ unsafe fn handle_mouse_down(hwnd: HWND, x: i32, y: i32) {
                             }
                         } else {
                             state.feedback_text =
-                                "No active persistent session found in Riot Client.".to_string();
+                                "No active persistent session in Riot Client.".to_string();
                             state.feedback_is_error = true;
                         }
                     }
                 }
                 InvalidateRect(hwnd, null_mut(), 0);
+            }
+            HitArea::BtnSwitchMenu => {
+                let accounts = {
+                    if let Some(state_arc) = GUI_STATE.get() {
+                        if let Ok(state) = state_arc.lock() {
+                            state.storage.load_config().accounts
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    }
+                };
+                if accounts.is_empty() {
+                    return;
+                }
+                let mut pt = POINT {
+                    x: PAD_X + 14,
+                    y: HERO_TOP_Y + 90,
+                };
+                ClientToScreen(hwnd, &mut pt);
+                let hmenu = CreatePopupMenu();
+                for (i, acc) in accounts.iter().enumerate() {
+                    let label = to_wstring(&format!(
+                        "✦  {} #{}  [{}]",
+                        acc.game_name, acc.tag_line, acc.region
+                    ));
+                    AppendMenuW(hmenu, MF_STRING, ID_CTX_SWITCH_BASE + i, label.as_ptr());
+                }
+                TrackPopupMenu(
+                    hmenu,
+                    TPM_LEFTALIGN | TPM_TOPALIGN,
+                    pt.x,
+                    pt.y,
+                    0,
+                    hwnd,
+                    null_mut(),
+                );
+                DestroyMenu(hmenu);
+            }
+            HitArea::BtnNextAccount => {
+                trigger_next_account(hwnd);
+            }
+            HitArea::Account(idx) => {
+                trigger_account_switch(hwnd, idx);
             }
             HitArea::AddAccount => {
                 if is_busy {
@@ -1900,8 +2310,7 @@ unsafe fn handle_mouse_down(hwnd: HWND, x: i32, y: i32) {
                         if let Ok(mut state) = state_arc.lock() {
                             state.is_busy = true;
                             state.feedback_text =
-                                "⚡ Backing up active session & preparing clean login..."
-                                    .to_string();
+                                "⚡ Preparing clean login screen...".to_string();
                             state.feedback_is_error = false;
                             (state.riot.clone(), state.storage.clone())
                         } else {
@@ -1916,7 +2325,6 @@ unsafe fn handle_mouse_down(hwnd: HWND, x: i32, y: i32) {
 
                 let hwnd_val = hwnd as isize;
                 std::thread::spawn(move || {
-                    // Layer 1: Backup current active account before clearing!
                     storage.backup_current_active_session(&riot);
                     riot.prepare_clean_login();
                     let _ = riot.launch("riot_client");
@@ -1926,38 +2334,24 @@ unsafe fn handle_mouse_down(hwnd: HWND, x: i32, y: i32) {
                             state.is_busy = false;
                             state.active_account = None;
                             state.feedback_text =
-                                "✦ Riot Client ready! Sign in with 'Stay signed in' checked."
-                                    .to_string();
+                                "✦ Sign in with 'Stay signed in' checked!".to_string();
                             state.feedback_is_error = false;
                         }
                     }
-                    unsafe {
-                        PostMessageW(hwnd_val as HWND, WM_APP_ASYNC_DONE, 0, 0);
-                    }
+                    PostMessageW(hwnd_val as HWND, WM_APP_ASYNC_DONE, 0, 0);
                 });
             }
-            HitArea::Account(idx) | HitArea::PlayBtn(idx) => {
+            HitArea::BtnKillRiot => {
                 if is_busy {
                     return;
                 }
-                let (target_id, target_name, riot, storage) = {
+                let (riot, storage) = {
                     if let Some(state_arc) = GUI_STATE.get() {
                         if let Ok(mut state) = state_arc.lock() {
-                            let conf = state.storage.load_config();
-                            if idx < conf.accounts.len() {
-                                let id = conf.accounts[idx].id.clone();
-                                let name = format!(
-                                    "{} #{}",
-                                    conf.accounts[idx].game_name, conf.accounts[idx].tag_line
-                                );
-                                state.is_busy = true;
-                                state.feedback_text =
-                                    format!("⚡ Switching session to {}...", name);
-                                state.feedback_is_error = false;
-                                (id, name, state.riot.clone(), state.storage.clone())
-                            } else {
-                                return;
-                            }
+                            state.is_busy = true;
+                            state.feedback_text = "⏻ Closing Riot Client...".to_string();
+                            state.feedback_is_error = false;
+                            (state.riot.clone(), state.storage.clone())
                         } else {
                             return;
                         }
@@ -1970,106 +2364,17 @@ unsafe fn handle_mouse_down(hwnd: HWND, x: i32, y: i32) {
 
                 let hwnd_val = hwnd as isize;
                 std::thread::spawn(move || {
-                    // 1. Pre-switch backup of currently active account's rotated token
                     storage.backup_current_active_session(&riot);
-
-                    // 2. Kill all Riot Client & game processes cleanly
                     RiotManager::kill_riot_processes();
-
-                    // 3. Post-kill backup in case Riot Client flushed token on exit
-                    storage.backup_current_active_session(&riot);
-
-                    // 4. Apply target profile session
-                    let res = storage.apply_profile(&target_id, &riot.settings_yaml_path);
-
-                    match res {
-                        Ok(_) => {
-                            let launch_res = riot.launch("riot_client");
-                            if let Some(state_arc) = GUI_STATE.get() {
-                                if let Ok(mut state) = state_arc.lock() {
-                                    state.is_busy = false;
-                                    state.active_account = state.riot.get_active_account();
-                                    match launch_res {
-                                        Ok(_) => {
-                                            state.feedback_text =
-                                                format!("✦ Launched: {}", target_name);
-                                            state.feedback_is_error = false;
-                                        }
-                                        Err(e) => {
-                                            state.feedback_text = format!("Error: {}", e);
-                                            state.feedback_is_error = true;
-                                        }
-                                    }
-                                }
-                            }
-                            unsafe {
-                                PostMessageW(hwnd_val as HWND, WM_APP_ASYNC_DONE, 0, 0);
-                            }
-
-                            // Layer 2: Capture rotated refresh token at +4s and +8s after Riot Client boot
-                            for delay_secs in [4u64, 4u64] {
-                                std::thread::sleep(std::time::Duration::from_secs(delay_secs));
-                                storage.backup_current_active_session(&riot);
-                                unsafe {
-                                    PostMessageW(hwnd_val as HWND, WM_APP_ASYNC_DONE, 0, 0);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if let Some(state_arc) = GUI_STATE.get() {
-                                if let Ok(mut state) = state_arc.lock() {
-                                    state.is_busy = false;
-                                    state.feedback_text = e;
-                                    state.feedback_is_error = true;
-                                }
-                            }
-                            unsafe {
-                                PostMessageW(hwnd_val as HWND, WM_APP_ASYNC_DONE, 0, 0);
-                            }
-                        }
-                    }
-                });
-            }
-            HitArea::Delete(idx) => {
-                if is_busy {
-                    return;
-                }
-                let target_id = {
-                    if let Some(state_arc) = GUI_STATE.get() {
-                        if let Ok(state) = state_arc.lock() {
-                            let conf = state.storage.load_config();
-                            if idx < conf.accounts.len() {
-                                conf.accounts[idx].id.clone()
-                            } else {
-                                return;
-                            }
-                        } else {
-                            return;
-                        }
-                    } else {
-                        return;
-                    }
-                };
-
-                let confirm_txt = to_wstring("Remove this account from Riot Fast Login?");
-                let confirm_title = to_wstring("Confirm Remove");
-                let confirm = MessageBoxW(
-                    hwnd,
-                    confirm_txt.as_ptr(),
-                    confirm_title.as_ptr(),
-                    MB_YESNO | MB_ICONQUESTION,
-                );
-                if confirm == IDYES {
                     if let Some(state_arc) = GUI_STATE.get() {
                         if let Ok(mut state) = state_arc.lock() {
-                            let _ = state.storage.delete_profile(&target_id);
-                            state.account_icons.remove(&target_id);
-                            state.feedback_text = "Account removed from workspace.".to_string();
+                            state.is_busy = false;
+                            state.feedback_text = "✦ All Riot processes closed.".to_string();
                             state.feedback_is_error = false;
                         }
                     }
-                    InvalidateRect(hwnd, null_mut(), 0);
-                }
+                    PostMessageW(hwnd_val as HWND, WM_APP_ASYNC_DONE, 0, 0);
+                });
             }
         }
     }
